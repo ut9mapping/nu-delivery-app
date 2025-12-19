@@ -2,57 +2,87 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 
-# 1. ตั้งค่าความปลอดภัย
+# --- 1. ตั้งค่าความปลอดภัย ---
 try:
     API_KEY = st.secrets["API_KEY"]
     SHEET_ID = st.secrets["SHEET_ID"]
     genai.configure(api_key=API_KEY)
 except Exception as e:
-    st.error(f"❌ ปัญหาเรื่อง Secrets: {e}")
+    st.error(f"❌ ไม่พบ Secrets: {e}")
     st.stop()
 
-# 2. ตั้งค่า UI
+# --- 2. ฟังก์ชันแก้ปัญหา 404 (ค้นหาชื่อรุ่นที่ถูกต้องให้เอง) ---
+def get_available_model():
+    try:
+        # ดึงรายชื่อโมเดลทั้งหมดที่ API Key นี้เข้าถึงได้
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # ลำดับความสำคัญของรุ่นที่เราอยากได้
+        priority_models = [
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-flash-latest',
+            'models/gemini-1.5-pro',
+            'models/gemini-pro'
+        ]
+        
+        for p in priority_models:
+            if p in models:
+                return p
+        return models[0] if models else None
+    except Exception as e:
+        st.error(f"ไม่สามารถดึงรายชื่อโมเดลได้: {e}")
+        return None
+
+# เก็บชื่อรุ่นที่ใช้ได้ไว้ใน Session
+if 'valid_model_name' not in st.session_state:
+    st.session_state.valid_model_name = get_available_model()
+
+# --- 3. ตั้งค่า UI ---
 st.set_page_config(page_title="NU Delivery", page_icon="🛵")
 st.title("🛵 NU Delivery Smart Assistant")
 
-# 3. ดึงข้อมูลจาก Sheets
+if not st.session_state.valid_model_name:
+    st.error("❌ ไม่พบโมเดล AI ที่ใช้งานได้ในบัญชีของคุณ กรุณาตรวจสอบ API Key ใน Google AI Studio")
+    st.stop()
+else:
+    st.caption(f"✅ เชื่อมต่อสำเร็จ: ใช้รุ่น {st.session_state.valid_model_name}")
+
+# --- 4. ดึงข้อมูลจาก Sheets ---
 url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 @st.cache_data(ttl=60)
 def load_data():
     try:
         return pd.read_csv(url)
-    except Exception as e:
-        st.error(f"เชื่อมต่อ Sheets ไม่ได้: {e}")
+    except:
         return pd.DataFrame()
 
 df = load_data()
-tab1, tab2 = st.tabs(["🔍 ถามทาง", "✨ สรุปข้อมูล"])
+tab1, tab2 = st.tabs(["🔍 สอบถามทาง", "✨ สรุปข้อมูลด่วน"])
 
-# ส่วนการเรียกใช้ AI
-def ask_gemini(prompt_text):
+# ฟังก์ชันเรียก AI
+def call_gemini(prompt):
     try:
-        # ใช้ชื่อรุ่นมาตรฐานที่ Google รองรับในปัจจุบัน
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt_text)
+        model = genai.GenerativeModel(st.session_state.valid_model_name)
+        response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"❌ เกิดข้อผิดพลาดจาก Google API: {e}"
+        return f"❌ เกิดข้อผิดพลาด: {e}"
 
 with tab1:
-    q = st.text_input("พิมพ์คำถาม (เช่น ตึกวิศวะจอดรถตรงไหน):")
+    q = st.text_input("ถามทาง / หาจุดส่ง:")
     if q:
         if not df.empty:
-            with st.spinner("AI กำลังค้นหา..."):
+            with st.spinner("AI กำลังหาคำตอบ..."):
                 context = df.to_string(index=False)
-                answer = ask_gemini(f"ข้อมูลอ้างอิง:\n{context}\n\nคำถาม: {q}")
-                st.info(answer)
+                res = call_gemini(f"ข้อมูลอ้างอิง:\n{context}\n\nคำถาม: {q}\nตอบสั้นๆ กระชับ")
+                st.info(res)
         else:
-            st.warning("ไม่มีข้อมูลในระบบ")
+            st.warning("ไม่มีข้อมูลใน Sheets")
 
 with tab2:
-    txt = st.text_area("ข้อมูลที่ต้องการให้กลั่นกรอง:")
-    if st.button("🪄 สรุปข้อมูล"):
+    txt = st.text_area("วางข้อมูลหน้างาน:")
+    if st.button("🪄 สรุป"):
         if txt:
             with st.spinner("กำลังสรุป..."):
-                summary = ask_gemini(f"สรุปข้อมูลนี้เป็นหัวข้อสั้นๆ: {txt}")
-                st.success(summary)
+                res = call_gemini(f"สรุปข้อมูลนี้เป็นหัวข้อสั้นๆ: {txt}")
+                st.success(res)

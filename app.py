@@ -1,88 +1,84 @@
 import streamlit as st
 import google.generativeai as genai
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
+from streamlit_js_eval import streamlit_js_eval
 
-# --- 1. ตั้งค่าความปลอดภัย ---
+# --- 1. เชื่อมต่อระบบ (AI & Google Sheets) ---
 try:
-    API_KEY = st.secrets["API_KEY"]
-    SHEET_ID = st.secrets["SHEET_ID"]
-    genai.configure(api_key=API_KEY)
+    genai.configure(api_key=st.secrets["API_KEY"])
+    
+    # เชื่อมต่อ Google Sheets โดยใช้กุญแจจาก Secrets
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(st.secrets["SHEET_ID"]).get_worksheet(0)
 except Exception as e:
-    st.error(f"❌ ไม่พบ Secrets: {e}")
+    st.error(f"❌ การเชื่อมต่อล้มเหลว: {e}")
     st.stop()
 
-# --- 2. ฟังก์ชันแก้ปัญหา 404 (ค้นหาชื่อรุ่นที่ถูกต้องให้เอง) ---
-def get_available_model():
-    try:
-        # ดึงรายชื่อโมเดลทั้งหมดที่ API Key นี้เข้าถึงได้
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # ลำดับความสำคัญของรุ่นที่เราอยากได้
-        priority_models = [
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-flash-latest',
-            'models/gemini-1.5-pro',
-            'models/gemini-pro'
-        ]
-        
-        for p in priority_models:
-            if p in models:
-                return p
-        return models[0] if models else None
-    except Exception as e:
-        st.error(f"ไม่สามารถดึงรายชื่อโมเดลได้: {e}")
-        return None
+st.set_page_config(page_title="NU Mapping", page_icon="📍")
+st.title("🛵 NU Delivery Mapping")
 
-# เก็บชื่อรุ่นที่ใช้ได้ไว้ใน Session
-if 'valid_model_name' not in st.session_state:
-    st.session_state.valid_model_name = get_available_model()
-
-# --- 3. ตั้งค่า UI ---
-st.set_page_config(page_title="NU Delivery", page_icon="🛵")
-st.title("🛵 NU Delivery Smart Assistant")
-
-if not st.session_state.valid_model_name:
-    st.error("❌ ไม่พบโมเดล AI ที่ใช้งานได้ในบัญชีของคุณ กรุณาตรวจสอบ API Key ใน Google AI Studio")
-    st.stop()
-else:
-    st.caption(f"✅ เชื่อมต่อสำเร็จ: ใช้รุ่น {st.session_state.valid_model_name}")
-
-# --- 4. ดึงข้อมูลจาก Sheets ---
-url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
-@st.cache_data(ttl=60)
+# --- 2. ฟังก์ชันดึงข้อมูล ---
+@st.cache_data(ttl=10) # อัปเดตข้อมูลทุก 10 วินาที
 def load_data():
-    try:
-        return pd.read_csv(url)
-    except:
-        return pd.DataFrame()
+    return pd.DataFrame(sheet.get_all_records())
 
 df = load_data()
-tab1, tab2 = st.tabs(["🔍 สอบถามทาง", "✨ สรุปข้อมูลด่วน"])
 
-# ฟังก์ชันเรียก AI
-def call_gemini(prompt):
-    try:
-        model = genai.GenerativeModel(st.session_state.valid_model_name)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"❌ เกิดข้อผิดพลาด: {e}"
+tab1, tab2 = st.tabs(["🔍 ค้นหา & นำทาง", "📌 บันทึกพิกัดใหม่"])
 
+# --- Tab 1: ค้นหาและนำทาง ---
 with tab1:
-    q = st.text_input("ถามทาง / หาจุดส่ง:")
-    if q:
-        if not df.empty:
-            with st.spinner("AI กำลังหาคำตอบ..."):
-                context = df.to_string(index=False)
-                res = call_gemini(f"ข้อมูลอ้างอิง:\n{context}\n\nคำถาม: {q}\nตอบสั้นๆ กระชับ")
-                st.info(res)
-        else:
-            st.warning("ไม่มีข้อมูลใน Sheets")
+    query = st.text_input("พิมพ์ชื่อตึกหรือสถานที่เพื่อนำทาง:")
+    if query:
+        with st.spinner("AI กำลังค้นหาข้อมูล..."):
+            context = df.to_string(index=False)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            prompt = f"ข้อมูล: {context}\nคำถาม: {query}\nตอบสั้นๆ ว่าสถานที่นี้คืออะไร และบอกจุดสังเกตถ้ามี"
+            response = model.generate_content(prompt)
+            st.info(response.text)
+            
+            # ค้นหาพิกัดในฐานข้อมูล
+            match = df[df.apply(lambda row: query.lower() in row.astype(str).str.lower().values, axis=1)]
+            if not match.empty:
+                lat = match.iloc[0].get('Latitude')
+                lon = match.iloc[0].get('Longitude')
+                if lat and lon:
+                    # สร้างลิงก์นำทาง Google Maps
+                    nav_url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}"
+                    st.link_button("🚗 เปิด Google Maps นำทางทันที", nav_url)
+                else:
+                    st.warning("⚠️ สถานที่นี้ยังไม่มีพิกัดบันทึกไว้")
 
+# --- Tab 2: บันทึกพิกัดใหม่ ---
 with tab2:
-    txt = st.text_area("วางข้อมูลหน้างาน:")
-    if st.button("🪄 สรุป"):
-        if txt:
-            with st.spinner("กำลังสรุป..."):
-                res = call_gemini(f"สรุปข้อมูลนี้เป็นหัวข้อสั้นๆ: {txt}")
-                st.success(res)
+    st.subheader("เพิ่มจุดส่งของใหม่")
+    name = st.text_input("ชื่อสถานที่ (เช่น ตึกวิศวะ Sc1):")
+    note = st.text_area("หมายเหตุ/จุดจอดรถ:")
+    
+    # ดึงพิกัดจากเบราว์เซอร์มือถือ
+    st.write("ขั้นตอนที่ 1: กดปุ่มด้านล่างเพื่อดึงตำแหน่งที่คุณยืนอยู่")
+    loc = streamlit_js_eval(data_of='get_location', key='get_loc')
+    
+    if loc:
+        lat = loc['coords']['latitude']
+        lon = loc['coords']['longitude']
+        st.success(f"📍 พบพิกัดแล้ว: {lat}, {lon}")
+        
+        if st.button("💾 บันทึกลงฐานข้อมูล"):
+            if name:
+                try:
+                    # บันทึกลง Google Sheets (ชื่อ, หมายเหตุ, ละติจูด, ลองจิจูด)
+                    sheet.append_row([name, note, lat, lon])
+                    st.balloons()
+                    st.success(f"บันทึก '{name}' เรียบร้อย! ข้อมูลจะปรากฏในการค้นหาทันที")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"บันทึกไม่สำเร็จ: {e}")
+            else:
+                st.error("กรุณาใส่ชื่อสถานที่ด้วยครับ")
+    else:
+        st.info("รอพิกัดจาก GPS... (หากไม่ขึ้น ให้ตรวจสอบว่าเปิด Location ในมือถือหรือยัง)")

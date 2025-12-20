@@ -3,3 +3,5 @@ google-generativeai>=0.8.0
 gspread
 google-auth
 streamlit-geolocation
+pandas
+Pillow

@@ -1,97 +1,101 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
+import pandas as pd
 from google.oauth2.service_account import Credentials
 from streamlit_geolocation import streamlit_geolocation
 from datetime import datetime
+from PIL import Image
 
 # --- ตั้งค่าหน้าจอ ---
-st.set_page_config(page_title="GPS Tracker v2", page_icon="📍")
-st.title("📍 บันทึกพิกัดแบบจัดระเบียบตาราง")
+st.set_page_config(page_title="Gemini Delivery Pro", page_icon="📦", layout="wide")
+st.title("📦 ระบบบันทึกพิกัดและวิเคราะห์การส่งของ")
 
-# --- 1. เชื่อมต่อ Google AI (Gemini 2.5 Flash) ---
+# --- 1. เชื่อมต่อ Gemini 2.5 Flash ---
 try:
     genai.configure(api_key=st.secrets["API_KEY"])
     model = genai.GenerativeModel('models/gemini-2.5-flash')
 except Exception as e:
-    st.error(f"❌ ตั้งค่า Gemini ไม่สำเร็จ: {e}")
+    st.error(f"❌ Gemini Connection Error: {e}")
 
-# --- 2. ฟังก์ชันเชื่อมต่อและเช็คหัวตาราง ---
-def get_organized_sheet():
+# --- 2. ฟังก์ชันจัดการ Google Sheets ---
+def get_sheet():
     try:
         scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         gc = gspread.authorize(creds)
         sheet = gc.open_by_key(st.secrets["SHEET_ID"]).get_worksheet(0)
-        
-        # เช็คว่าแถวที่ 1 มีข้อมูลหรือยัง (ถ้าไม่มีให้สร้างหัวข้อ)
-        headers = ["วัน-เวลา", "ละติจูด", "ลองจิจูด", "บันทึกเพิ่มเติม", "AI สรุปข้อมูล"]
-        first_row = sheet.row_values(1)
-        
-        if not first_row:
-            sheet.insert_row(headers, 1)
-            st.info("💡 สร้างหัวตารางใน Google Sheets ให้ใหม่เรียบร้อยแล้ว")
-            
         return sheet
     except Exception as e:
-        st.error(f"❌ การเชื่อมต่อ Sheet ผิดพลาด: {e}")
+        st.error(f"❌ Sheets Connection Error: {e}")
         return None
 
-# --- 3. ส่วน GPS ---
-st.subheader("ดึงพิกัดปัจจุบัน")
-location = streamlit_geolocation()
+# --- 3. ส่วน UI หลัก ---
+col_input, col_display = st.columns([1, 1])
 
-if location.get('latitude') is not None:
-    lat = location['latitude']
-    lon = location['longitude']
-    st.success(f"✅ ตรวจพบพิกัด: {lat}, {lon}")
+with col_input:
+    st.subheader("📍 ข้อมูลการส่งของ")
     
-    # แสดงตารางตัวอย่างที่จะบันทึก
-    with st.expander("ดูรูปแบบข้อมูลที่จะบันทึก"):
-        st.table({
-            "หัวข้อ": ["ละติจูด", "ลองจิจูด"],
-            "ข้อมูล": [lat, lon]
-        })
+    # 3.1 ดึงพิกัด GPS
+    location = streamlit_geolocation()
+    lat = location.get('latitude')
+    lon = location.get('longitude')
+    
+    if lat and lon:
+        st.success(f"พิกัดปัจจุบัน: {lat}, {lon}")
+        
+        # 3.2 ถ่ายภาพหรือแนบรูป (Optional)
+        img_file = st.camera_input("📷 ถ่ายรูปยืนยันการส่ง (ถ้ามี)")
+        
+        # 3.3 บันทึกเพิ่มเติม
+        note = st.text_area("✍️ รายละเอียดเพิ่มเติม:", placeholder="เช่น บ้านปิดสนิท วางของไว้ที่รั้ว...")
 
-    note = st.text_area("✍️ บันทึกรายละเอียดงาน:", placeholder="เช่น ส่งของบ้านคุณเอ / สภาพการจราจร...")
+        if st.button("🚀 ประมวลผลและบันทึก"):
+            sheet = get_sheet()
+            if sheet:
+                with st.spinner('Gemini กำลังวิเคราะห์ข้อมูล...'):
+                    try:
+                        # เตรียมข้อมูลให้ Gemini (ใส่ทั้งข้อความและรูปภาพ)
+                        prompt = f"พิกัด {lat}, {lon} รายละเอียด: {note}. ช่วยสรุปสถานะการส่งนี้สั้นๆ 1 ประโยค"
+                        
+                        if img_file:
+                            img = Image.open(img_file)
+                            response = model.generate_content([prompt, img])
+                        else:
+                            response = model.generate_content(prompt)
+                        
+                        ai_comment = response.text.strip()
+                        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # บันทึกลง Sheet (เวลา, Lat, Lon, Note, AI)
+                        sheet.append_row([now, lat, lon, note, ai_comment])
+                        
+                        st.balloons()
+                        st.success("บันทึกข้อมูลสำเร็จ!")
+                        st.info(f"🤖 AI วิเคราะห์ว่า: {ai_comment}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+    else:
+        st.warning("👈 คลิกไอคอนหมุดด้านบนเพื่อดึงพิกัด GPS ก่อนครับ")
 
-    if st.button("🚀 บันทึกลงตาราง"):
-        sheet = get_organized_sheet()
+with col_display:
+    st.subheader("🗺️ แผนที่พิกัดปัจจุบัน")
+    if lat and lon:
+        # แสดงแผนที่จุดที่อยู่ปัจจุบัน
+        map_data = pd.DataFrame({'lat': [lat], 'lon': [lon]})
+        st.map(map_data)
+    else:
+        st.info("รอพิกัด GPS เพื่อแสดงแผนที่...")
+
+    st.write("---")
+    st.subheader("🕒 ประวัติการบันทึกล่าสุด")
+    if st.button("🔄 ดึงประวัติจาก Sheets"):
+        sheet = get_sheet()
         if sheet:
-            with st.spinner('กำลังจัดระเบียบข้อมูลและบันทึก...'):
-                try:
-                    # ให้ Gemini ช่วยสรุป
-                    prompt = f"สรุปพิกัด {lat}, {lon} และบันทึก '{note}' เป็นภาษาไทย 1 ประโยคสั้นๆ"
-                    response = model.generate_content(prompt)
-                    ai_comment = response.text.strip()
-
-                    # เรียงลำดับข้อมูลให้ตรงกับหัวตาราง (A, B, C, D, E)
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    row_to_add = [now, lat, lon, note, ai_comment]
-                    
-                    # บันทึกข้อมูล
-                    sheet.append_row(row_to_add)
-                    
-                    st.balloons()
-                    st.success("✅ บันทึกข้อมูลสอดคล้องกับคอลัมน์เรียบร้อย!")
-                    
-                    # แสดงสิ่งที่บันทึกไป
-                    st.write("---")
-                    st.markdown(f"**🕒 เวลา:** {now}")
-                    st.markdown(f"**📝 บันทึก:** {note}")
-                    st.markdown(f"**🤖 AI สรุป:** {ai_comment}")
-                    
-                except Exception as e:
-                    st.error(f"เกิดข้อผิดพลาด: {e}")
-else:
-    st.warning("👈 กรุณากดที่ไอคอนวงกลมเพื่อแชร์พิกัด")
-
-# ส่วนแสดงคู่มือเล็กๆ
-with st.sidebar:
-    st.header("การจัดเรียงคอลัมน์")
-    st.write("A: วัน-เวลา")
-    st.write("B: ละติจูด")
-    st.write("C: ลองจิจูด")
-    st.write("D: บันทึก")
-    st.write("E: AI สรุป")
+            data = sheet.get_all_records()
+            if data:
+                df = pd.DataFrame(data)
+                st.table(df.tail(5)) # โชว์ 5 แถวล่าสุด
+            else:
+                st.write("ยังไม่มีข้อมูลในตาราง")

@@ -8,7 +8,7 @@ import google.generativeai as genai
 import re
 
 # --- ตั้งค่าหน้าจอ ---
-st.set_page_config(page_title="NU Delivery Visualizer Pro", page_icon="🛵", layout="wide")
+st.set_page_config(page_title="NU Smart Tracker Pro", page_icon="🛵", layout="wide")
 
 # --- 1. การเชื่อมต่อ Google Services ---
 def get_sheets():
@@ -16,12 +16,12 @@ def get_sheets():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
     return gspread.authorize(creds).open_by_key(st.secrets["SHEET_ID"])
 
-# เชื่อมต่อ AI Gemini
+# เชื่อมต่อ AI (ใช้ 1.5 Flash เพื่อความเสถียรและ Quota ที่มากกว่า)
 try:
     genai.configure(api_key=st.secrets["API_KEY"])
-    model = genai.GenerativeModel('models/gemini-2.0-flash') # ใช้เวอร์ชันเสถียร
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
 except: 
-    st.error("AI Config Error: กรุณาเช็ก API_KEY ใน Secrets")
+    st.error("AI Config Error: กรุณาตรวจสอบ API_KEY ใน Secrets")
 
 # --- 2. ฟังก์ชันโหลดและล้างข้อมูล (ป้องกัน KeyError) ---
 def load_mapping_df():
@@ -30,10 +30,11 @@ def load_mapping_df():
         sheet = sh.worksheet("Mapping")
         data = sheet.get_all_records()
         if not data:
-            return pd.DataFrame(columns=["ประตู", "ฝั่งถนน/โซน", "ซอยหลัก", "ซอยย่อย/ทางเชื่อม", "ฝั่ง/จุดรายละเอียด"])
+            cols = ["ประตู", "ฝั่งถนน/โซน", "ซอยหลัก", "ซอยย่อย/ทางเชื่อม", "ฝั่ง/จุดรายละเอียด"]
+            return pd.DataFrame(columns=cols)
         
         df = pd.DataFrame(data)
-        # ลบเว้นวรรคที่หัวคอลัมน์และข้อมูลทุกช่องป้องกัน Error
+        # ตัดช่องว่างที่หัวตารางและข้อมูลทุกช่องป้องกัน KeyError
         df.columns = [str(c).strip() for c in df.columns]
         df = df.map(lambda x: str(x).strip() if isinstance(x, str) else x)
         return df
@@ -41,129 +42,141 @@ def load_mapping_df():
         st.error(f"Error Loading Mapping: {e}")
         return pd.DataFrame(columns=["ประตู", "ฝั่งถนน/โซน", "ซอยหลัก", "ซอยย่อย/ทางเชื่อม", "ฝั่ง/จุดรายละเอียด"])
 
+# ฟังก์ชันกรองตัวเลือกแบบลำดับชั้น
 def get_options(df, filters):
     temp_df = df.copy()
     for col, val in filters.items():
         if val and val != "-- เลือก --":
             temp_df = temp_df[temp_df[col] == val]
-    # ดึงคอลัมน์ถัดไปจากจำนวน filter ที่ใส่มา
     target_col_idx = len(filters)
     if target_col_idx < len(df.columns):
-        return sorted([x for x in temp_df.iloc[:, target_col_idx].unique() if x and x != "-" and x != ""])
+        # กรองเอาค่าที่ไม่ว่างและไม่ใช่เครื่องหมายลบ
+        return sorted([str(x) for x in temp_df.iloc[:, target_col_idx].unique() if x and str(x) != "-" and str(x) != ""])
     return []
 
 # --- 3. UI หลัก ---
-st.title("📍 ระบบพิกัดขนส่ง มน. (Visual Search)")
+st.title("📍 ระบบพิกัดขนส่ง มน. (Visual & Robust Search)")
 mapping_df = load_mapping_df()
 
-tab1, tab2, tab3 = st.tabs(["📌 บันทึกงานส่งของ", "🔍 ค้นหา & ดูภาพแผนที่", "⚙️ Admin (จัดการซอย)"])
+tab1, tab2, tab3 = st.tabs(["📌 บันทึกงานส่งของ", "🔍 ค้นหาพิกัด & ภาพจำลอง", "⚙️ Admin (จัดการซอย)"])
 
-# --- TAB 1: บันทึกงาน (5 ระดับ) ---
+# --- TAB 1: บันทึกงาน (โครงสร้าง 5 ระดับ) ---
 with tab1:
     location = streamlit_geolocation()
     lat, lon = location.get('latitude'), location.get('longitude')
 
     if lat and lon:
-        st.success(f"📍 พิกัดพร้อมบันทึก: {lat:.6f}, {lon:.6f}")
+        st.success(f"📍 GPS พร้อม: {lat:.6f}, {lon:.6f}")
         
-        # ค้นหาประตู
+        # คอลัมน์เลือกแบบ Dynamic
         gate = st.selectbox("1. เลือกประตู:", ["-- เลือก --"] + sorted(mapping_df['ประตู'].unique().tolist()))
         
         if gate != "-- เลือก --":
             col1, col2 = st.columns(2)
             with col1:
                 zones = get_options(mapping_df, {"ประตู": gate})
-                zone = st.selectbox("2. ฝั่งถนน/โซน:", ["-- เลือก --"] + zones) if zones else "-"
+                zone = st.selectbox("2. ฝั่งถนน/โซนหลัก:", ["-- เลือก --"] + zones) if zones else "-"
             with col2:
-                if zone != "-- เลือก --":
-                    main_sois = get_options(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone})
-                    main_soi = st.selectbox("3. ซอยหลัก:", ["-- เลือก --"] + main_sois) if main_sois else "-"
-                else: main_soi = "-- เลือก --"
+                m_sois = get_options(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone}) if zone != "-- เลือก --" else []
+                main_soi = st.selectbox("3. ซอยหลัก:", ["-- เลือก --"] + m_sois) if m_sois else "-"
 
             col3, col4 = st.columns(2)
             with col3:
-                if main_soi != "-- เลือก --":
-                    sub_sois = get_options(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone, "ซอยหลัก": main_soi})
-                    sub_soi = st.selectbox("4. ซอยย่อย/ทางเชื่อม:", ["-- เลือก --"] + sub_sois) if sub_sois else "-"
-                else: sub_soi = "-- เลือก --"
+                s_sois = get_options(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone, "ซอยหลัก": main_soi}) if main_soi != "-- เลือก --" else []
+                sub_soi = st.selectbox("4. ซอยย่อย/ทางเชื่อม:", ["-- เลือก --"] + s_sois) if s_sois else "-"
             with col4:
-                if sub_soi != "-- เลือก --":
-                    details = get_options(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone, "ซอยหลัก": main_soi, "ซอยย่อย/ทางเชื่อม": sub_soi})
-                    detail = st.selectbox("5. ฝั่ง/จุดละเอียด:", ["-- เลือก --"] + details) if details else "-"
-                else: detail = "-- เลือก --"
+                dets = get_options(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone, "ซอยหลัก": main_soi, "ซอยย่อย/ทางเชื่อม": sub_soi}) if sub_soi != "-- เลือก --" else []
+                detail = st.selectbox("5. ฝั่ง/จุดละเอียด:", ["-- เลือก --"] + dets) if dets else "-"
 
-            extra = st.text_input("✍️ หมายเหตุเพิ่มเติม (เลขห้อง/ชื่อร้าน):")
+            extra = st.text_input("✍️ หมายเหตุเพิ่มเติม (เลขห้อง/ชื่อร้าน/ชื่อหอ):")
 
-            if st.button("🚀 ยืนยันบันทึกพิกัด"):
-                with st.spinner("กำลังส่งข้อมูล..."):
+            if st.button("🚀 บันทึกพิกัดลงฐานข้อมูล"):
+                with st.spinner("กำลังบันทึก..."):
                     sh = get_sheets()
                     log_sheet = sh.worksheet("Sheet1")
                     full_info = f"{gate} | {zone} | {main_soi} | {sub_soi} | {detail} | {extra}"
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     maps_url = f"https://www.google.com/maps?q={lat},{lon}"
-                    log_sheet.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), full_info, lat, lon, maps_url])
+                    log_sheet.append_row([now, full_info, lat, lon, maps_url])
                     st.balloons()
-                    st.success("บันทึกสำเร็จ!")
+                    st.success(f"บันทึกสำเร็จ: {full_info}")
     else:
-        st.warning("📍 กรุณากดปุ่ม GPS เพื่อดึงพิกัดปัจจุบัน")
+        st.warning("📍 กรุณาเปิด GPS และกดปุ่มเพื่อดึงพิกัด")
 
-# --- TAB 2: ค้นหา + ภาพจำลองแผนที่ ---
+# --- TAB 2: ค้นหา (AI + Fallback Search + Map) ---
 with tab2:
-    st.header("🔍 ค้นหาสถานที่ & ดูภาพจำลอง")
-    query = st.text_input("ถาม AI เช่น 'ร้านเครปประตู 4 อยู่ตรงไหน', 'หอนริศาเคยไปส่งไหม'")
+    st.header("🔍 ค้นหาประวัติด้วย AI และภาพจำลอง")
+    query = st.text_input("ค้นหา เช่น 'หอนริศา', 'ร้านปลาวาฬ', 'ประตู 4 ซอยว่องเคยไปไหม'")
     
-    if st.button("ค้นหาข้อมูล"):
-        with st.spinner("AI กำลังตรวจสอบประวัติ..."):
-            try:
-                sh = get_sheets()
-                history_df = pd.DataFrame(sh.worksheet("Sheet1").get_all_records())
-                
-                # ลบช่องว่างหัวตารางกันพลาด
-                history_df.columns = [str(c).strip() for c in history_df.columns]
+    if st.button("เริ่มการค้นหา"):
+        if query:
+            with st.spinner("กำลังค้นหาพิกัด..."):
+                try:
+                    sh = get_sheets()
+                    history_df = pd.DataFrame(sh.worksheet("Sheet1").get_all_records())
+                    history_df.columns = [str(c).strip() for c in history_df.columns]
 
-                prompt = f"""
-                นี่คือประวัติการส่งของ: {history_df.to_string()}
-                คำถาม: {query}
-                ช่วยตอบคำถามจากข้อมูล และถ้าเจอพิกัด ให้ใส่บรรทัดใหม่ว่า "COORD_FOUND: ละติจูด,ลองจิจูด"
-                """
-                
-                response = model.generate_content(prompt).text
-                
-                # ดึงพิกัด
-                coord_match = re.search(r"COORD_FOUND:\s*([0-9.]+),\s*([0-9.]+)", response)
-                st.markdown(f"**🤖 AI:** {response.split('COORD_FOUND')[0]}")
+                    m_lat, m_lon, found_text = None, None, ""
 
-                if coord_match:
-                    m_lat, m_lon = float(coord_match.group(1)), float(coord_match.group(2))
-                    st.write("---")
-                    st.subheader("📸 ภาพจำลองแผนที่จุดส่ง")
-                    map_df = pd.DataFrame({'lat': [m_lat], 'lon': [m_lon]})
-                    st.map(map_df, zoom=17)
-                    st.write(f"🔗 [เปิดใน Google Maps](https://www.google.com/maps?q={m_lat},{m_lon})")
-            except Exception as e:
-                st.error(f"ค้นหาไม่สำเร็จ: {e}")
+                    # 1. พยายามใช้ AI (Gemini 1.5 Flash)
+                    try:
+                        prompt = f"""
+                        ข้อมูลประวัติ: {history_df.tail(40).to_string()}
+                        คำถาม: {query}
+                        ตอบคำถาม และถ้าเจอพิกัดให้ใส่ "COORD_FOUND: lat,lon"
+                        """
+                        response = model.generate_content(prompt).text
+                        coord_match = re.search(r"COORD_FOUND:\s*([0-9.]+),\s*([0-9.]+)", response)
+                        
+                        if coord_match:
+                            m_lat, m_lon = float(coord_match.group(1)), float(coord_match.group(2))
+                            found_text = response.split("COORD_FOUND")[0]
+                        else:
+                            found_text = response
+                    except Exception as ai_err:
+                        st.warning("⚠️ AI โควตาเต็ม กำลังใช้ระบบค้นหาสำรอง...")
+                        # 2. ระบบสำรอง (Keyword Search)
+                        results = history_df[history_df['บันทึก'].str.contains(query, case=False, na=False)]
+                        if not results.empty:
+                            last_hit = results.iloc[-1]
+                            m_lat, m_lon = float(last_hit['ละติจูด']), float(last_hit['ลองจิจูด'])
+                            found_text = f"เจอข้อมูลล่าสุดจากระบบค้นหาปกติ: {last_hit['บันทึก']}"
+                        else:
+                            found_text = "ขออภัย ไม่พบข้อมูลสถานที่นี้ในประวัติ"
 
-# --- TAB 3: Admin (ปุ่มบวกเพิ่มซอย) ---
+                    # แสดงผล
+                    st.markdown(f"**🤖 ผลการค้นหา:** {found_text}")
+                    if m_lat and m_lon:
+                        st.write("---")
+                        st.subheader("📸 ภาพจำลองแผนที่")
+                        st.map(pd.DataFrame({'lat': [m_lat], 'lon': [m_lon]}), zoom=17)
+                        st.write(f"🔗 [เปิด Google Maps นำทาง](https://www.google.com/maps?q={m_lat},{m_lon})")
+
+                except Exception as e:
+                    st.error(f"เกิดข้อผิดพลาดในการเข้าถึงข้อมูล: {e}")
+        else:
+            st.warning("กรุณาพิมพ์ชื่อสถานที่เพื่อค้นหา")
+
+# --- TAB 3: Admin (ปุ่มบวกจัดการ Database) ---
 with tab3:
-    st.header("⚙️ ระบบจัดการโครงสร้าง (Admin)")
-    if st.text_input("ใส่รหัส PIN:", type="password") == "9999":
-        st.subheader("➕ เพิ่มข้อมูลโครงสร้างใหม่")
-        with st.form("add_structure"):
-            c1, c2, c3 = st.columns(3)
-            with c1: 
-                a_gate = st.text_input("1. ประตู")
-                a_zone = st.text_input("2. ฝั่งถนน/โซน")
-            with c2:
-                a_soi = st.text_input("3. ซอยหลัก")
-                a_sub = st.text_input("4. ซอยย่อย (ถ้าไม่มีใส่ -)")
-            with c3:
-                a_det = st.text_input("5. ฝั่ง/จุดรายละเอียด")
+    st.header("⚙️ จัดการโครงสร้างซอย (Admin)")
+    if st.text_input("รหัสผ่าน Admin:", type="password") == "9999":
+        st.subheader("➕ เพิ่มข้อมูลโครงสร้าง 5 ระดับ")
+        st.info("ใช้เครื่องหมายลบ '-' หากไม่มีข้อมูลในระดับนั้น")
+        with st.form("admin_add"):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            a_gate = c1.text_input("1. ประตู")
+            a_zone = c2.text_input("2. ฝั่งถนน/โซน")
+            a_soi = c3.text_input("3. ซอยหลัก")
+            a_sub = c4.text_input("4. ซอยย่อย/เชื่อม")
+            a_det = c5.text_input("5. ฝั่ง/จุดละเอียด")
             
-            if st.form_submit_button("➕ เพิ่มข้อมูลลงระบบ"):
+            if st.form_submit_button("➕ บันทึกโครงสร้างใหม่"):
                 if a_gate and a_soi:
                     sh = get_sheets()
                     sh.worksheet("Mapping").append_row([a_gate, a_zone, a_soi, a_sub, a_det])
                     st.cache_data.clear()
-                    st.success("เพิ่มข้อมูลแล้ว! กรุณากด Refresh หน้าเว็บ")
+                    st.success("เพิ่มข้อมูลสำเร็จ!")
                     st.rerun()
                 else:
-                    st.error("กรุณากรอก ประตู และ ซอยหลัก เป็นอย่างน้อย")
+                    st.error("กรุณากรอกข้อมูล 'ประตู' และ 'ซอยหลัก' เป็นอย่างน้อย")

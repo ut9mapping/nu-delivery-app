@@ -40,115 +40,101 @@ def display_precision_map(lat, lon, zoom=18):
     st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom), map_style='carto-positron'))
 
 # --- 3. ส่วน UI หลัก ---
-st.title("🛵 ระบบพิกัดขนส่ง มน. (Dynamic Admin)")
+st.title("🛵 ระบบพิกัดขนส่ง มน. (Dynamic Subset)")
 mapping_df = load_mapping_df()
 
 tab1, tab2, tab3 = st.tabs(["📌 บันทึกงานส่งของ", "🔍 ค้นหาพิกัด", "⚙️ Admin Manage"])
 
-# --- TAB 1: บันทึกงาน (ตามเดิม) ---
+# --- TAB 1 & 2 (คงความสามารถเดิม) ---
 with tab1:
     location = streamlit_geolocation()
     if location.get('latitude'):
         lat, lon = location['latitude'], location['longitude']
-        st.success(f"📍 GPS พร้อม: {lat:.6f}, {lon:.6f}")
-        display_precision_map(lat, lon, zoom=17)
-        gate = st.selectbox("1. เลือกประตู:", ["-- เลือก --"] + sorted(mapping_df['ประตู'].unique().tolist()))
+        st.success(f"📍 GPS พร้อม: {lat:.6f}, {lon:.6f}"); display_precision_map(lat, lon, zoom=17)
+        gate = st.selectbox("1. เลือกประตู:", ["-- เลือก --"] + sorted([str(x) for x in mapping_df['ประตู'].unique() if x]))
         if gate != "-- เลือก --":
-            # กรองข้อมูลตามลำดับ 5 ระดับ
             def get_opts(df, filters):
                 temp = df.copy()
                 for k, v in filters.items():
                     if v and v != "-- เลือก --": temp = temp[temp[k] == v]
                 idx = len(filters)
                 return sorted([str(x) for x in temp.iloc[:, idx].unique() if str(x) not in ["", "-"]]) if idx < len(df.columns) else []
-
             c1, c2 = st.columns(2)
             zone = c1.selectbox("2. ฝั่งของถนน:", ["-- เลือก --"] + get_opts(mapping_df, {"ประตู": gate}))
             main_soi = c2.selectbox("3. ซอยหลัก:", ["-- เลือก --"] + get_opts(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone}))
-            
             c3, c4 = st.columns(2)
             sub_soi = c3.selectbox("4. ซอยย่อย/ทางเชื่อม:", ["-- เลือก --"] + get_opts(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone, "ซอยหลัก": main_soi}))
             detail = c4.selectbox("5. ฝั่งของซอยย่อย (ลำดับสุดท้าย):", ["-- เลือก --"] + get_opts(mapping_df, {"ประตู": gate, "ฝั่งถนน/โซน": zone, "ซอยหลัก": main_soi, "ซอยย่อย/ทางเชื่อม": sub_soi}))
-            
             extra = st.text_input("✍️ หมายเหตุเพิ่มเติม (เลขห้อง/ชื่อหอ):")
-            if st.button("🚀 บันทึกพิกัดลงฐานข้อมูล"):
-                sh = get_sheets()
-                sh.worksheet("Sheet1").append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"{gate}|{zone}|{main_soi}|{sub_soi}|{detail}|{extra}", lat, lon, f"http://google.com/maps?q={lat},{lon}"])
+            if st.button("🚀 บันทึกพิกัด"):
+                sh = get_sheets(); sh.worksheet("Sheet1").append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), f"{gate}|{zone}|{main_soi}|{sub_soi}|{detail}|{extra}", lat, lon, "URL"])
                 st.balloons(); st.success("บันทึกสำเร็จ!")
 
-# --- TAB 2: ค้นหา (ตามเดิม) ---
 with tab2:
     query = st.text_input("🔍 ค้นหาชื่อสถานที่/ซอย:")
     if st.button("ค้นหา"):
         sh = get_sheets(); history_df = pd.DataFrame(sh.worksheet("Sheet1").get_all_records())
         results = history_df[history_df['บันทึก'].str.contains(query, case=False, na=False)]
         if not results.empty:
-            last = results.iloc[-1]; st.info(f"พบข้อมูล: {last['บันทึก']}")
-            display_precision_map(float(last['ละติจูด']), float(last['ลองจิจูด']), zoom=19)
+            last = results.iloc[-1]; st.info(f"พบข้อมูล: {last['บันทึก']}"); display_precision_map(float(last['ละติจูด']), float(last['ลองจิจูด']), zoom=19)
         else: st.error("ไม่พบข้อมูล")
 
-# --- TAB 3: ADMIN MANAGE (ปรับปรุงใหม่ตามคำขอ) ---
+# --- TAB 3: ADMIN MANAGE (ปรับปรุง: 1 ซอยหลัก หลายซอยย่อย) ---
 with tab3:
-    st.header("⚙️ จัดการโครงสร้างซอยและฝั่งถนน")
-    admin_pin = st.text_input("กรอก Admin PIN:", type="password")
-    
-    if admin_pin == "9999":
-        st.subheader("➕ เพิ่มข้อมูลชุดใหม่ (กดปุ่มบวกเพื่อเพิ่มซอย/ฝั่ง)")
+    st.header("⚙️ จัดการโครงสร้างซอย")
+    if st.text_input("Admin PIN:", type="password") == "9999":
+        st.subheader("➕ เพิ่มซอยย่อยจำนวนมาก ภายใต้ซอยหลักเดียว")
         
-        # 1. เลือกส่วนหัว (ประตู และ ฝั่งถนน)
-        c1, c2 = st.columns(2)
+        # ส่วนที่ 1: ลำดับชั้นบน (ประตู -> ฝั่งถนน -> ซอยหลัก)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            sel_gate = st.selectbox("เลือกประตู:", ["-- เพิ่มใหม่ --"] + sorted(mapping_df['ประตู'].unique().tolist()))
-            final_gate = st.text_input("ระบุชื่อประตูใหม่:") if sel_gate == "-- เพิ่มใหม่ --" else sel_gate
+            sel_gate = st.selectbox("เลือกประตู:", ["-- เพิ่มใหม่ --"] + sorted([str(x) for x in mapping_df['ประตู'].unique() if x]))
+            final_gate = st.text_input("ระบุประตูใหม่:") if sel_gate == "-- เพิ่มใหม่ --" else sel_gate
         with c2:
-            sel_zone = st.selectbox("เลือกฝั่งของถนน:", ["-- เพิ่มใหม่ --"] + sorted(mapping_df[mapping_df['ประตู']==final_gate]['ฝั่งถนน/โซน'].unique().tolist())) if final_gate else "-- เพิ่มใหม่ --"
-            final_zone = st.text_input("ระบุฝั่งถนนใหม่ (เช่น ซ้าย/ขวา):", value="-") if sel_zone == "-- เพิ่มใหม่ --" else sel_zone
+            sel_zone = st.selectbox("เลือกฝั่งถนน:", ["-- เพิ่มใหม่ --"] + sorted([str(x) for x in mapping_df[mapping_df['ประตู']==final_gate]['ฝั่งถนน/โซน'].unique() if x])) if final_gate else "-- เพิ่มใหม่ --"
+            final_zone = st.text_input("ระบุฝั่งถนนใหม่:", value="-") if sel_zone == "-- เพิ่มใหม่ --" else sel_zone
+        with c3:
+            sel_main = st.selectbox("เลือกซอยหลัก:", ["-- เพิ่มใหม่ --"] + sorted([str(x) for x in mapping_df[(mapping_df['ประตู']==final_gate) & (mapping_df['ฝั่งถนน/โซน']==final_zone)]['ซอยหลัก'].unique() if x])) if final_zone else "-- เพิ่มใหม่ --"
+            final_main = st.text_input("ระบุซอยหลักใหม่:") if sel_main == "-- เพิ่มใหม่ --" else sel_main
 
-        st.markdown("---")
-        
-        # 2. ส่วน Dynamic Rows (ซอยหลัก -> ซอยย่อย -> ฝั่งสุดท้าย)
-        if 'rows' not in st.session_state:
-            st.session_state.rows = [{"main": "", "sub": "-", "det": "-"}]
-
-        def add_row(): st.session_state.rows.append({"main": "", "sub": "-", "det": "-"})
-        def remove_row(i): 
-            if len(st.session_state.rows) > 1: st.session_state.rows.pop(i)
-
-        for i, row in enumerate(st.session_state.rows):
-            cols = st.columns([3, 3, 3, 0.5])
-            st.session_state.rows[i]['main'] = cols[0].text_input(f"ซอยหลัก", value=row['main'], key=f"m_{i}", placeholder="เช่น ซอยเฟื่องฟ้า")
-            st.session_state.rows[i]['sub'] = cols[1].text_input(f"ซอยย่อย", value=row['sub'], key=f"s_{i}")
-            st.session_state.rows[i]['det'] = cols[2].text_input(f"ฝั่งซอยย่อย (ท้ายสุด)", value=row['det'], key=f"d_{i}", placeholder="เช่น ฝั่งซ้าย/ท้ายซอย")
-            if cols[3].button("🗑️", key=f"del_{i}"):
-                remove_row(i); st.rerun()
-
-        # ปุ่มบวกจำนวนซอย/ฝั่ง
-        st.button("➕ เพิ่มรายการถัดไป", on_click=add_row)
-
-        if st.button("💾 บันทึกข้อมูลทั้งหมด", type="primary"):
-            new_entries = [[final_gate, final_zone, r['main'], r['sub'], r['det']] for r in st.session_state.rows if r['main']]
-            if new_entries:
-                sh = get_sheets(); sh.worksheet("Mapping").append_rows(new_entries)
-                st.session_state.rows = [{"main": "", "sub": "-", "det": "-"}]
-                st.success(f"บันทึกสำเร็จ {len(new_entries)} รายการ!"); st.rerun()
-            else: st.error("กรุณากรอกชื่อซอยหลักอย่างน้อย 1 ช่อง")
-
+        st.markdown(f"📍 **กำลังเพิ่มข้อมูลลงใน:** `{final_gate}` > `{final_zone}` > `{final_main}`")
         st.divider()
 
-        # 3. ตารางและการลบ (ยืนยันรหัส)
-        st.subheader("🗑️ รายการทั้งหมด (ลบข้อมูล)")
+        # ส่วนที่ 2: เพิ่มรายการซอยย่อยแบบ Dynamic
+        if 'sub_rows' not in st.session_state:
+            st.session_state.sub_rows = [{"sub": "", "det": "-"}]
+
+        def add_sub_row(): st.session_state.sub_rows.append({"sub": "", "det": "-"})
+        def remove_sub_row(i): 
+            if len(st.session_state.sub_rows) > 1: st.session_state.sub_rows.pop(i)
+
+        for i, row in enumerate(st.session_state.sub_rows):
+            cols = st.columns([5, 5, 1])
+            st.session_state.sub_rows[i]['sub'] = cols[0].text_input(f"ซอยย่อยที่ {i+1}", value=row['sub'], key=f"sub_{i}", placeholder="เช่น ซอยย่อย 1 / ทางเชื่อม")
+            st.session_state.sub_rows[i]['det'] = cols[1].text_input(f"ฝั่งซอยย่อย (สุดท้าย) {i+1}", value=row['det'], key=f"det_{i}", placeholder="เช่น ฝั่งซ้าย / ท้ายซอย")
+            if cols[2].button("🗑️", key=f"del_sub_{i}"):
+                remove_sub_row(i); st.rerun()
+
+        st.button("➕ เพิ่มซอยย่อยถัดไป", on_click=add_sub_row)
+
+        if st.button("💾 บันทึกซอยย่อยทั้งหมด", type="primary"):
+            new_entries = [[final_gate, final_zone, final_main, r['sub'], r['det']] for r in st.session_state.sub_rows if r['sub']]
+            if new_entries and final_gate and final_main:
+                sh = get_sheets(); sh.worksheet("Mapping").append_rows(new_entries)
+                st.session_state.sub_rows = [{"sub": "", "det": "-"}]
+                st.success(f"บันทึกสำเร็จ {len(new_entries)} รายการ!"); st.rerun()
+            else: st.error("กรุณาระบุข้อมูลให้ครบถ้วน")
+
+        st.divider()
+        # ส่วนลบข้อมูล (คงเดิม)
+        st.subheader("🗑️ รายการทั้งหมด")
         st.dataframe(mapping_df, use_container_width=True)
-        del_idx = st.number_input("ลำดับแถวที่จะลบ (Index):", min_value=0, max_value=len(mapping_df)-1, step=1)
-        
-        if st.button("❌ ลบแถวที่เลือก", type="secondary"):
-            st.session_state.pending_del = del_idx
-        
-        if st.session_state.get('pending_del') is not None:
-            st.warning(f"คุณกำลังจะลบแถวที่ {st.session_state.pending_del} ยืนยันหรือไม่?")
-            v_pin = st.text_input("ใส่รหัส PIN เพื่อลบถาวร:", type="password", key="v_pin")
-            if st.button("🔥 ยืนยันการลบเด็ดขาด"):
-                if v_pin == "9999":
-                    sh = get_sheets(); sh.worksheet("Mapping").delete_rows(int(st.session_state.pending_del) + 2)
-                    st.session_state.pending_del = None
-                    st.success("ลบเรียบร้อย!"); st.rerun()
-                else: st.error("รหัสผิด")
+        del_idx = st.number_input("ลำดับแถวที่จะลบ:", min_value=0, max_value=len(mapping_df)-1, step=1)
+        if st.button("❌ ลบแถวที่เลือก"):
+            st.session_state.p_del = del_idx
+        if st.session_state.get('p_del') is not None:
+            if st.text_input("ใส่ PIN ยืนยันลบ:", type="password", key="v") == "9999":
+                if st.button("🔥 ยืนยันลบถาวร"):
+                    sh = get_sheets(); sh.worksheet("Mapping").delete_rows(int(st.session_state.p_del) + 2)
+                    st.session_state.p_del = None; st.success("ลบสำเร็จ!"); st.rerun()
+                    

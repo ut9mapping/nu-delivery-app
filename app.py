@@ -4,146 +4,123 @@ import pandas as pd
 from google.oauth2.service_account import Credentials
 from streamlit_geolocation import streamlit_geolocation
 from datetime import datetime
-import pydeck as pdk
 
 # --- 1. การตั้งค่าระบบและการเชื่อมต่อ ---
-st.set_page_config(page_title="NU Delivery Master V3", layout="wide")
+st.set_page_config(page_title="NU Delivery: 3-Image Support", layout="wide")
 
 def get_sheets():
     try:
         scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
-        client = gspread.authorize(creds)
-        return client.open_by_key(st.secrets["SHEET_ID"])
+        return gspread.authorize(creds).open_by_key(st.secrets["SHEET_ID"])
     except Exception as e:
-        st.error(f"❌ เชื่อมต่อ Google Sheets ไม่สำเร็จ: {e}")
+        st.error(f"❌ เชื่อมต่อไม่ได้: {e}")
         return None
 
-# ฟังก์ชันโหลดข้อมูลแบบป้องกันชื่อคอลัมน์ซ้ำ
-@st.cache_data(ttl=2)
-def load_sheet_data():
+def load_data():
     sh = get_sheets()
     if not sh: return pd.DataFrame()
-    try:
-        ws = sh.worksheet("Sheet1")
-        all_vals = ws.get_all_values()
-        if len(all_vals) > 0:
-            raw_headers = all_vals[0]
-            # จัดการชื่อคอลัมน์ซ้ำ (Deduplicate)
-            clean_headers = []
-            for i, h in enumerate(raw_headers):
-                name = str(h).strip().lower() if h else f"col_{i}"
-                if name in clean_headers or name == "":
-                    name = f"{name}_{i}"
-                clean_headers.append(name)
-            
-            df = pd.DataFrame(all_vals[1:], columns=clean_headers)
-            return df
-        return pd.DataFrame()
-    except:
-        return pd.DataFrame()
+    ws = sh.worksheet("Sheet1")
+    # ดึงข้อมูลทั้งหมดมาเป็น DataFrame
+    return pd.DataFrame(ws.get_all_records())
 
-# --- 2. ส่วน UI หน้าหลัก ---
-st.title("📍 ระบบบันทึกพิกัด NU Delivery")
+# --- 2. หน้าจอหลัก ---
+st.title("🛵 NU Delivery: ระบบบันทึกพิกัดและรูปภาพ")
 
-tab1, tab2 = st.tabs(["📌 บันทึกพิกัดใหม่", "🗺️ แผนที่ & ตารางข้อมูล"])
+tab1, tab2, tab3 = st.tabs(["📌 บันทึกหน้างาน", "⚙️ แอดมินวิเคราะห์", "🔍 ค้นหาและนำทาง"])
 
+# --- TAB 1: บันทึกข้อมูล (รับ 3 รูป) ---
 with tab1:
-    st.subheader("เพิ่มข้อมูลใหม่")
-    
-    # ดึงพิกัด GPS
+    st.subheader("📸 ลงทะเบียนพิกัดและถ่ายรูป (3 รูป)")
     location = streamlit_geolocation()
     lat, lon = location.get('latitude'), location.get('longitude')
     
-    if lat:
-        st.success(f"✅ จับพิกัดได้: {lat}, {lon}")
-    else:
-        st.warning("📡 กำลังรอสัญญาณ GPS... (โปรดกดยอมรับสิทธิ์ระบุตำแหน่ง)")
+    if lat: st.success(f"📍 GPS พร้อมบันทึก: {lat}, {lon}")
+    else: st.info("📡 กำลังรอพิกัด GPS...")
 
-    # ฟอร์มกรอกข้อมูล
-    place_name = st.text_input("🏠 ชื่อสถานที่ / บ้านเลขที่ (จำเป็น)")
-    location_path = st.text_input("📍 เส้นทาง/ซอย (เช่น ประตู 4 > ซอย 2)")
-    note = st.text_area("🗒️ หมายเหตุเพิ่มเติม")
-
-    if st.button("💾 บันทึกข้อมูลลงแถวใหม่", type="primary", use_container_width=True):
-        if not lat or not lon:
-            st.error("❌ บันทึกไม่ได้: ไม่พบพิกัด GPS")
-        elif not place_name:
-            st.warning("⚠️ โปรดกรอกชื่อสถานที่")
-        else:
-            with st.spinner("กำลังส่งข้อมูล..."):
-                try:
-                    sh = get_sheets()
-                    ws = sh.worksheet("Sheet1")
-                    
-                    # เตรียมข้อมูลให้ตรง 10 คอลัมน์ (A-J)
-                    new_row = [
-                        datetime.now().strftime("%Y-%m-%d %H:%M"), # A: timestamp
-                        location_path,                             # B: location_path
-                        lat,                                       # C: lat
-                        lon,                                       # D: lon
-                        place_name,                                # E: place_name
-                        "", "", "",                                # F, G, H: images (ว่าง)
-                        note,                                      # I: note
-                        "Complete"                                 # J: status
-                    ]
-                    
-                    # บันทึกแบบแทรกแถวที่ 2 (เพื่อให้ข้อมูลใหม่ขึ้นข้างบนเสมอ)
-                    ws.insert_row(new_row, index=2)
-                    
-                    st.balloons()
-                    st.success(f"✅ บันทึก '{place_name}' สำเร็จแล้ว! ข้อมูลจะปรากฏที่แถวที่ 2")
-                    st.cache_data.clear() # ล้างแคชเพื่อให้ Tab 2 เห็นข้อมูลทันที
-                except Exception as e:
-                    st.error(f"❌ เกิดข้อผิดพลาดขณะบันทึก: {e}")
-
-with tab2:
-    st.subheader("ตรวจสอบข้อมูลในระบบ")
+    p_name = st.text_input("🏠 ชื่อสถานที่ / จุดสังเกต")
+    note = st.text_area("🗒️ รายละเอียดเพิ่มเติม")
     
-    if st.button("🔄 อัปเดตข้อมูลล่าสุด"):
-        st.cache_data.clear()
-        st.rerun()
+    st.write("---")
+    st.write("🖼️ อัปโหลดรูปภาพสถานที่ (สูงสุด 3 รูป)")
+    col_img1, col_img2, col_img3 = st.columns(3)
+    with col_img1:
+        img1 = st.file_uploader("รูปที่ 1", type=['jpg', 'jpeg', 'png'], key="img1")
+    with col_img2:
+        img2 = st.file_uploader("รูปที่ 2", type=['jpg', 'jpeg', 'png'], key="img2")
+    with col_img3:
+        img3 = st.file_uploader("รูปที่ 3", type=['jpg', 'jpeg', 'png'], key="img3")
 
-    df = load_sheet_data()
-    
-    if not df.empty:
-        # ส่วนค้นหา
-        search_query = st.text_input("🔍 ค้นหาชื่อสถานที่ในตาราง:")
-        
-        # กรองข้อมูล
-        display_df = df.copy()
-        if search_query:
-            display_df = display_df[display_df.astype(str).apply(lambda x: x.str.contains(search_query, case=False)).any(axis=1)]
-
-        # แสดงตาราง
-        st.write(f"พบข้อมูลทั้งหมด {len(display_df)} รายการ")
-        st.dataframe(display_df, use_container_width=True)
-
-        # เตรียมแผนที่
-        if 'lat' in display_df.columns and 'lon' in display_df.columns:
-            display_df['lat'] = pd.to_numeric(display_df['lat'], errors='coerce')
-            display_df['lon'] = pd.to_numeric(display_df['lon'], errors='coerce')
-            df_map = display_df.dropna(subset=['lat', 'lon'])
+    if st.button("🚀 บันทึกข้อมูลทั้งหมด", use_container_width=True, type="primary"):
+        if lat and p_name:
+            # ตรวจสอบสถานะรูปภาพ
+            s1 = "Yes" if img1 else "No"
+            s2 = "Yes" if img2 else "No"
+            s3 = "Yes" if img3 else "No"
             
-            if not df_map.empty:
-                st.write("📍 ตำแหน่งบนแผนที่:")
-                st.pydeck_chart(pdk.Deck(
-                    initial_view_state=pdk.ViewState(
-                        latitude=df_map['lat'].iloc[0], 
-                        longitude=df_map['lon'].iloc[0], 
-                        zoom=14
-                    ),
-                    layers=[
-                        pdk.Layer(
-                            "ScatterplotLayer",
-                            df_map,
-                            get_position='[lon, lat]',
-                            get_color='[255, 0, 0, 160]',
-                            get_radius=40,
-                            pickable=True
-                        ),
-                    ],
-                    tooltip={"text": "{place_name}\n{location_path}"}
-                ))
-    else:
-        st.info("ยังไม่มีข้อมูลในระบบ หรือกำลังโหลด...")
+            # เตรียมแถวข้อมูล (12 คอลัมน์)
+            # timestamp(A) | lat(B) | lon(C) | place_name(D) | note(E) | status(F) | gate(G) | alley(H) | zone(I) | img1(J) | img2(K) | img3(L)
+            new_row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M"), 
+                lat, lon, p_name, note, 
+                "รอวิเคราะห์", "", "", "", 
+                s1, s2, s3
+            ]
+            
+            try:
+                get_sheets().worksheet("Sheet1").insert_row(new_row, index=2)
+                st.balloons()
+                st.success("✅ บันทึกสำเร็จ! ส่งข้อมูลให้แอดมินแล้ว")
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาด: {e}")
+        else:
+            st.warning("⚠️ กรุณากรอกชื่อสถานที่และเปิด GPS")
+
+# --- TAB 2: แอดมินวิเคราะห์ ---
+with tab2:
+    st.subheader("แอดมิน: แยกหมวดหมู่ ประตู/ซอย/โซน")
+    df = load_data()
+    if not df.empty:
+        pending = df[df['status'] == "รอวิเคราะห์"]
+        if not pending.empty:
+            target = st.selectbox("เลือกรายการ:", pending.index, format_func=lambda x: f"{pending.loc[x, 'place_name']}")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.info(f"📍 {pending.loc[target, 'place_name']}")
+                st.write(f"🖼️ รูปภาพที่มี: {pending.loc[target, 'img1']}, {pending.loc[target, 'img2']}, {pending.loc[target, 'img3']}")
+            with c2:
+                adm_gate = st.text_input("🚪 ประตู")
+                adm_alley = st.text_input("🛣️ ซอย")
+                adm_zone = st.selectbox("🌍 โซน", ["ฝั่งใน", "ฝั่งนอก", "หอพัก"])
+                
+            if st.button("💾 บันทึกการวิเคราะห์"):
+                ws = get_sheets().worksheet("Sheet1")
+                row_idx = int(target) + 2
+                ws.update_cell(row_idx, 6, "วิเคราะห์แล้ว")
+                ws.update_cell(row_idx, 7, adm_gate)
+                ws.update_cell(row_idx, 8, adm_alley)
+                ws.update_cell(row_idx, 9, adm_zone)
+                st.success("อัปเดตเรียบร้อย!")
+                st.rerun()
+        else: st.info("ไม่มีงานค้าง")
+
+# --- TAB 3: ค้นหาและนำทาง ---
+with tab3:
+    st.subheader("🔍 ค้นหาและนำทาง")
+    all_data = load_data()
+    search = st.text_input("พิมพ์ชื่อสถานที่ หรือ ซอย:")
+    
+    if not all_data.empty:
+        mask = all_data.apply(lambda r: search.lower() in str(r.values).lower(), axis=1)
+        res = all_data[mask]
+        
+        for idx, row in res.iterrows():
+            with st.expander(f"📍 {row['place_name']} ({row['gate']} {row['alley']})"):
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    st.write(f"**โซน:** {row['zone']} | **หมายเหตุ:** {row['note']}")
+                    st.write(f"🖼️ รูปภาพในระบบ: 1:[{row['img1']}] 2:[{row['img2']}] 3:[{row['img3']}]")
+                with col_b:
+                    maps_url = f"https://www.google.com/maps/search/?api=1&query={row['lat']},{row['lon']}"
+                    st.link_button("🚗 นำทาง", maps_url, type="primary")

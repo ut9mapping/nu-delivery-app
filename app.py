@@ -7,140 +7,103 @@ from datetime import datetime
 import pydeck as pdk
 
 # --- 1. ตั้งค่าการเชื่อมต่อ ---
-st.set_page_config(page_title="NU Delivery Master", layout="wide")
+st.set_page_config(page_title="NU Delivery Final Fix", layout="wide")
 
 def get_sheets():
     try:
         scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
-        return gspread.authorize(creds).open_by_key(st.secrets["SHEET_ID"])
+        client = gspread.authorize(creds)
+        return client.open_by_key(st.secrets["SHEET_ID"])
     except Exception as e:
-        st.error(f"❌ เชื่อมต่อ Google Sheets ไม่ได้: {e}")
+        st.error(f"❌ เชื่อมต่อไม่ได้: {e}")
         return None
 
-# ฟังก์ชันโหลดข้อมูล (ล้างแคชบ่อยขึ้นเพื่อให้เห็นข้อมูลใหม่ทันที)
-@st.cache_data(ttl=5)
-def load_all_data():
+# โหลดข้อมูล (ไม่ใช้ Cache ในส่วนตาราง เพื่อให้เห็นความจริงล่าสุด)
+def load_sheet_data():
     sh = get_sheets()
-    if not sh: return pd.DataFrame(), pd.DataFrame()
-    
-    # โหลด Mapping
+    if not sh: return pd.DataFrame()
     try:
-        m_df = pd.DataFrame(sh.worksheet("Mapping").get_all_records()).astype(str)
-    except: m_df = pd.DataFrame()
+        # ดึงจาก Sheet1
+        df = pd.DataFrame(sh.worksheet("Sheet1").get_all_records())
+        return df
+    except: return pd.DataFrame()
 
-    # โหลด Sheet1
-    try:
-        l_df = pd.DataFrame(sh.worksheet("Sheet1").get_all_records())
-        # แปลงหัวตารางเป็นตัวเล็กและตัดช่องว่างทิ้งป้องกัน Error
-        l_df.columns = [str(c).strip().lower() for c in l_df.columns]
-    except: l_df = pd.DataFrame()
-    
-    return m_df, l_df
+# --- 2. หน้าจอหลัก ---
+st.title("🚀 ระบบบันทึกพิกัด (เวอร์ชันแก้ไขด่วน)")
 
-# ฟังก์ชันดึงตัวเลือกDropdown
-def get_opts(df, col_name, filters={}):
-    if df.empty or col_name not in df.columns: return ["-- เลือก --"]
-    tmp = df.copy()
-    for k, v in filters.items():
-        if k in tmp.columns and v and v != "-- เลือก --":
-            tmp = tmp[tmp[k] == v]
-    res = sorted([str(x).strip() for x in tmp[col_name].unique() if x and str(x).lower() not in ["nan", "none", ""]])
-    return ["-- เลือก --"] + res
+# ตรวจสอบเบื้องต้น (Debug Zone)
+with st.expander("🛠️ คลิกเพื่อตรวจสอบการเชื่อมต่อ (Debug)", expanded=False):
+    sh = get_sheets()
+    if sh:
+        st.success(f"✅ ตอนนี้แอปเชื่อมต่อกับไฟล์ชื่อ: **{sh.title}**")
+        st.write("แผ่นงานที่มีในไฟล์นี้:", [w.title for w in sh.worksheets()])
+    else:
+        st.error("❌ เชื่อมต่อไฟล์ไม่ได้ ตรวจสอบ SHEET_ID ใน Secrets")
 
-mapping_df, log_df = load_all_data()
+tab1, tab2 = st.tabs(["📌 บันทึกข้อมูล", "🗺️ ดูข้อมูลในชีตปัจจุบัน"])
 
-# --- 2. หน้าจอหลัก (แบ่งเป็น 2 Tab หลัก) ---
-st.title("🛵 ระบบจัดการพิกัด (เวอร์ชันเสถียรที่สุด)")
-
-tab1, tab2 = st.tabs(["📌 บันทึกพิกัดใหม่", "🗺️ แผนที่ & ตรวจสอบข้อมูล"])
-
-# --- TAB 1: บันทึกข้อมูล ---
 with tab1:
+    # ดึงพิกัด
     location = streamlit_geolocation()
     lat, lon = location.get('latitude'), location.get('longitude')
     
     if lat:
-        st.success(f"📍 พิกัด GPS พร้อมบันทึก: {lat}, {lon}")
+        st.success(f"📍 พิกัด GPS ล็อกแล้ว: {lat}, {lon}")
     else:
-        st.warning("📡 กำลังรอพิกัด GPS... (โปรดกดยอมรับสิทธิ์ระบุตำแหน่ง)")
+        st.warning("📡 กำลังรอพิกัด GPS... (หากรอนานแล้วไม่มา ให้ลองเปลี่ยนเบราว์เซอร์หรือเปิด GPS ในมือถือ)")
 
-    place_name = st.text_input("🏠 ชื่อสถานที่ / บ้านเลขที่ (จำเป็น)")
-    
-    with st.expander("📍 ระบุรายละเอียดตำแหน่ง (ข้ามได้)", expanded=False):
-        c1, c2 = st.columns(2)
-        g = c1.selectbox("ประตู", get_opts(mapping_df, "ประตู"))
-        z = c2.selectbox("ฝั่งถนน/โซน", get_opts(mapping_df, "ฝั่งถนน/โซน", {"ประตู": g}))
-        m = c1.selectbox("ซอยหลัก", get_opts(mapping_df, "ซอยหลัก", {"ประตู": g, "ฝั่งถนน/โซน": z}))
-        ms = c2.selectbox("ฝั่งซอยหลัก", get_opts(mapping_df, "ฝั่งซอยหลัก", {"ประตู": g, "ฝั่งถนน/โซน": z, "ซอยหลัก": m}))
-
+    p_name = st.text_input("🏠 ชื่อสถานที่ / บ้านเลขที่", placeholder="เช่น หอพักคุณป้า")
     note = st.text_area("🗒️ หมายเหตุ")
 
-    if st.button("🚀 ยืนยันบันทึกข้อมูล", use_container_width=True, type="primary"):
-        if not lat or not lon:
+    if st.button("💾 บันทึกที่แถวบนสุด", type="primary", use_container_width=True):
+        if not lat:
             st.error("❌ บันทึกไม่ได้: ไม่พบพิกัด GPS")
-        elif not place_name:
-            st.warning("⚠️ โปรดระบุชื่อสถานที่")
+        elif not p_name:
+            st.warning("⚠️ โปรดกรอกชื่อสถานที่")
         else:
             try:
                 sh = get_sheets()
                 ws = sh.worksheet("Sheet1")
                 
-                path_str = f"{g} > {z} > {m} > {ms}".replace("-- เลือก --", "-")
-                
-                # เตรียมข้อมูล 10 คอลัมน์ (A-J) ตามหัวข้อภาษาอังกฤษในชีตของคุณ
+                # เตรียมข้อมูล 10 คอลัมน์ (A-J)
                 new_row = [
-                    datetime.now().strftime("%Y-%m-%d %H:%M"), # timestamp
-                    path_str,                                  # location_path
-                    lat,                                       # lat
-                    lon,                                       # lon
-                    place_name,                                # place_name
-                    "", "", "",                                # img1, img2, img3
-                    note,                                      # note
-                    "Complete"                                 # status
+                    datetime.now().strftime("%Y-%m-%d %H:%M"), # A
+                    "-",           # B: location_path (ย่อไว้ก่อน)
+                    lat, lon,      # C, D
+                    p_name,        # E
+                    "", "", "",    # F, G, H
+                    note,          # I
+                    "Complete"     # J
                 ]
                 
-                ws.append_row(new_row)
+                # เปลี่ยนจาก append_row เป็น insert_row(..., index=2) 
+                # เพื่อให้ข้อมูลโผล่ที่ "แถวที่ 2" (ใต้หัวข้อ) เสมอ!
+                ws.insert_row(new_row, index=2)
+                
                 st.balloons()
-                st.success(f"✅ บันทึก '{place_name}' สำเร็จแล้ว!")
-                st.cache_data.clear() # ล้างแคชทันทีเพื่อให้หน้าแผนที่เห็นข้อมูล
+                st.success(f"✅ บันทึกสำเร็จ! ข้อมูลจะอยู่ที่ 'แถวที่ 2' ของไฟล์คุณทันที")
             except Exception as e:
                 st.error(f"❌ เกิดข้อผิดพลาด: {e}")
 
-# --- TAB 2: แผนที่ & ตารางข้อมูล ---
 with tab2:
-    st.subheader("🗺️ อาณาเขตพิกัดทั้งหมด")
-    
-    # โหลดข้อมูลสดๆ
-    _, current_df = load_all_data()
-    
-    if not current_df.empty:
-        # ตรวจสอบว่ามีคอลัมน์ lat/lon ไหม
-        if 'lat' in current_df.columns and 'lon' in current_df.columns:
-            current_df['lat'] = pd.to_numeric(current_df['lat'], errors='coerce')
-            current_df['lon'] = pd.to_numeric(current_df['lon'], errors='coerce')
-            df_map = current_df.dropna(subset=['lat', 'lon'])
-
-            # ส่วนการค้นหา
-            search = st.text_input("🔍 ค้นหาชื่อสถานที่/ซอย:")
-            if search:
-                df_map = df_map[df_map.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)]
-
-            if not df_map.empty:
-                # แสดงแผนที่
-                st.pydeck_chart(pdk.Deck(
-                    initial_view_state=pdk.ViewState(latitude=df_map['lat'].mean(), longitude=df_map['lon'].mean(), zoom=14),
-                    layers=[pdk.Layer("ScatterplotLayer", df_map, get_position='[lon, lat]', get_color='[0, 200, 0, 160]', get_radius=30, pickable=True)],
-                    tooltip={"text": "{place_name}\n{location_path}"}
-                ))
-            
-            st.write("📊 **ข้อมูลล่าสุดในระบบ (10 รายการล่าสุด):**")
-            st.dataframe(current_df.tail(10), use_container_width=True)
-        else:
-            st.error("❌ หัวตารางใน Sheet1 ไม่ตรง! ต้องมีคำว่า lat และ lon")
-    else:
-        st.info("ยังไม่มีข้อมูลในระบบ")
-
-    if st.button("🔄 อัปเดตข้อมูล (Refresh)"):
+    st.subheader("📊 ข้อมูลจริงที่ดึงได้จาก Google Sheets")
+    if st.button("🔄 ดึงข้อมูลล่าสุด"):
         st.cache_data.clear()
-        st.rerun()
+    
+    df_live = load_sheet_data()
+    if not df_live.empty:
+        st.dataframe(df_live, use_container_width=True)
+        
+        # แสดงแผนที่เฉพาะตัวที่มีพิกัด
+        df_live['lat'] = pd.to_numeric(df_live['lat'], errors='coerce')
+        df_live['lon'] = pd.to_numeric(df_live['lon'], errors='coerce')
+        df_map = df_live.dropna(subset=['lat', 'lon'])
+        
+        if not df_map.empty:
+            st.pydeck_chart(pdk.Deck(
+                initial_view_state=pdk.ViewState(latitude=df_map['lat'].iloc[0], longitude=df_map['lon'].iloc[0], zoom=14),
+                layers=[pdk.Layer("ScatterplotLayer", df_map, get_position='[lon, lat]', get_color='[255, 0, 0, 160]', get_radius=30)],
+            ))
+    else:
+        st.info("ไม่พบข้อมูลใน Sheet1 หรือหัวตารางไม่ถูกต้อง")

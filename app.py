@@ -6,8 +6,8 @@ from streamlit_geolocation import streamlit_geolocation
 from datetime import datetime
 import pydeck as pdk
 
-# --- 1. การตั้งค่าระบบและการเชื่อมต่อ ---
-st.set_page_config(page_title="NU Delivery: Admin & Map Control", layout="wide")
+# --- 1. ตั้งค่าระบบและการเชื่อมต่อ ---
+st.set_page_config(page_title="NU Delivery: Smart System", layout="wide")
 
 def get_sheets():
     try:
@@ -16,120 +16,115 @@ def get_sheets():
         return gspread.authorize(creds).open_by_key(st.secrets["SHEET_ID"])
     except: return None
 
-def load_data_all():
+def load_data():
     sh = get_sheets()
     if not sh: return pd.DataFrame()
     ws = sh.worksheet("Sheet1")
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(ws.get_all_records())
     if not df.empty:
-        # ล้างช่องว่างในชื่อคอลัมน์เพื่อความแม่นยำ
         df.columns = [c.strip() for c in df.columns]
         df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
         df['lon'] = pd.to_numeric(df['lon'], errors='coerce')
+        return df.dropna(subset=['lat', 'lon'])
     return df
 
-# --- 2. หน้าจอหลัก ---
-st.title("🛵 NU Delivery System (Pro Version)")
+# --- 2. ระบบ Smart Search (ความฉลาดแบบ AI) ---
+def smart_search(df, query):
+    if not query: return df
+    keywords = query.lower().split()
+    def calculate_score(row):
+        score = 0
+        text_to_search = f"{row['place_name']} {row['note']} {row['gate']} {row['main_alley']}".lower()
+        for kw in keywords:
+            if kw in text_to_search:
+                score += 1
+                if kw in str(row['place_name']).lower(): score += 2 # ให้คะแนนชื่อสถานที่มากพิเศษ
+        return score
+    
+    df['relevance'] = df.apply(calculate_score, axis=1)
+    return df[df['relevance'] > 0].sort_values(by='relevance', ascending=False)
 
-tab1, tab2, tab3 = st.tabs(["📌 บันทึกหน้างาน", "⚙️ จัดการข้อมูล (Admin)", "🔍 อาณาเขตและค้นหา"])
+# --- 3. ส่วนหน้าจอแสดงผล ---
+st.title("🛵 NU Delivery Smart Pro")
 
-# --- TAB 1: บันทึกพิกัด (กู้คืนช่องใส่รูป 3 ช่อง) ---
+tab1, tab2, tab3 = st.tabs(["📌 บันทึกหน้างาน", "⚙️ จัดการข้อมูล (Admin)", "🔍 ค้นหาอัจฉริยะ"])
+
+# --- TAB 1: USER (ช่องใส่รูปครบ) ---
 with tab1:
-    st.subheader("📝 บันทึกพิกัดและรูปภาพ")
-    location = streamlit_geolocation()
-    lat, lon = location.get('latitude'), location.get('longitude')
+    st.subheader("📝 บันทึกพิกัดและรูปถ่าย")
+    loc = streamlit_geolocation()
+    lat, lon = loc.get('latitude'), loc.get('longitude')
     
-    if lat: st.success(f"📍 พิกัดพร้อม: {lat}, {lon}")
-    else: st.warning("📡 กำลังรอพิกัด GPS... (โปรดกดยอมรับสิทธิ์ตำแหน่งที่หน้าจอ)")
+    if lat: st.success(f"📍 GPS Lock: {lat}, {lon}")
+    else: st.warning("📡 กำลังค้นหาพิกัด... โปรดอนุญาตสิทธิ์ตำแหน่ง")
 
-    p_name = st.text_input("🏠 ชื่อสถานที่ / ตึกแถว / เลขที่อาคาร")
-    note = st.text_area("🗒️ รายละเอียดเพิ่มเติม (จุดสังเกต)")
+    p_name = st.text_input("🏠 ชื่อสถานที่/โครงการ")
+    note = st.text_area("🗒️ จุดสังเกต")
     
-    st.write("🖼️ อัปโหลดรูปภาพ (สูงสุด 3 รูป)")
-    col_i1, col_i2, col_i3 = st.columns(3)
-    img1 = col_i1.file_uploader("รูปที่ 1", type=['jpg','png'], key="up1")
-    img2 = col_i2.file_uploader("รูปที่ 2", type=['jpg','png'], key="up2")
-    img3 = col_i3.file_uploader("รูปที่ 3", type=['jpg','png'], key="up3")
+    st.write("🖼️ รูปถ่ายจุดพิกัด")
+    c1, c2, c3 = st.columns(3)
+    i1 = c1.file_uploader("รูป 1", type=['jpg','png'], key="i1")
+    i2 = c2.file_uploader("รูป 2", type=['jpg','png'], key="i2")
+    i3 = c3.file_uploader("รูป 3", type=['jpg','png'], key="i3")
 
-    if st.button("🚀 บันทึกข้อมูลเข้าชีต", use_container_width=True, type="primary"):
+    if st.button("🚀 บันทึกข้อมูล", use_container_width=True, type="primary"):
         if lat and p_name:
             ws = get_sheets().worksheet("Sheet1")
-            imgs = ["Yes" if i else "No" for i in [img1, img2, img3]]
-            # เตรียมข้อมูล (ลำดับคอลัมน์ต้องตรงกับ Sheet1)
+            imgs = ["Yes" if i else "No" for i in [i1, i2, i3]]
             new_row = [datetime.now().strftime("%Y-%m-%d %H:%M"), lat, lon, p_name, note, "รอวิเคราะห์"] + imgs + [""]*7
             ws.insert_row(new_row, index=2)
-            st.balloons()
-            st.success("✅ บันทึกข้อมูลสำเร็จ! แอดมินจะดำเนินการแยกหมวดหมู่ต่อไป")
-        else: st.error("⚠️ ข้อมูลไม่ครบ หรือยังตรวจไม่พบพิกัด GPS")
+            st.success("✅ บันทึกเรียบร้อย!")
+        else: st.error("⚠️ ข้อมูลไม่ครบ")
 
-# --- TAB 2: แอดมิน (แก้ไข/ลบ ข้อมูล + แก้ไข TypeError) ---
+# --- TAB 2: ADMIN (ปุ่มลบ/แก้ไข รายตัว) ---
 with tab2:
-    pwd = st.text_input("รหัสผ่านแอดมิน (9999)", type="password")
+    pwd = st.text_input("รหัสผ่านแอดมิน", type="password")
     if pwd == "9999":
-        st.info("🔓 เข้าสู่ระบบจัดการข้อมูล")
-        df_admin = load_data_all()
+        st.info("🔓 โหมดจัดการข้อมูล (CRUD Mode)")
+        df_admin = load_data()
         
-        if not df_admin.empty:
-            mode = st.radio("เลือกการทำงาน:", ["🛠️ แก้ไข/วิเคราะห์", "🗑️ ลบพิกัดที่เลือก"])
-            target_name = st.selectbox("เลือกสถานที่:", df_admin['place_name'].tolist())
-            
-            # ดึงข้อมูลแถวที่ต้องการ
-            target_data = df_admin[df_admin['place_name'] == target_name].iloc[0]
-            # แก้ไข TypeError ด้วยการแปลงค่า index เป็น Python int มาตรฐาน
-            actual_row_idx = int(df_admin.index[df_admin['place_name'] == target_name][0]) + 2
+        for idx, row in df_admin.iterrows():
+            actual_idx = int(idx) + 2
+            with st.expander(f"📍 {row['place_name']} (แถวที่ {actual_idx})"):
+                col_edit, col_del = st.columns([4, 1])
+                
+                with col_edit:
+                    e_note = st.text_input("แก้ไขหมายเหตุ", value=row['note'], key=f"n_{idx}")
+                    e_gate = st.text_input("ประตู", value=row.get('gate', ''), key=f"g_{idx}")
+                    if st.button("💾 บันทึกการแก้ไข", key=f"save_{idx}"):
+                        ws = get_sheets().worksheet("Sheet1")
+                        ws.update_cell(actual_idx, 5, e_note)
+                        ws.update_cell(actual_idx, 10, e_gate)
+                        st.success("อัปเดตแล้ว!")
+                        st.rerun()
+                
+                with col_del:
+                    st.write("---")
+                    if st.button("🗑️ ลบพิกัด", key=f"del_{idx}"):
+                        get_sheets().worksheet("Sheet1").delete_rows(actual_idx)
+                        st.warning("ลบข้อมูลแล้ว")
+                        st.rerun()
 
-            if mode == "🛠️ แก้ไข/วิเคราะห์":
-                c1, c2 = st.columns(2)
-                with c1:
-                    new_note = st.text_area("🗒️ แก้ไขหมายเหตุ", value=str(target_data.get('note', '')))
-                    new_gate = st.text_input("🚪 ประตู", value=str(target_data.get('gate', '')))
-                with c2:
-                    new_alley = st.text_input("🛣️ ซอยหลัก", value=str(target_data.get('main_alley', '')))
-                    new_side = st.selectbox("🌍 ฝั่ง", ["ฝั่งใน", "ฝั่งนอก", "-"], index=0)
-
-                if st.button("💾 บันทึกการเปลี่ยนแปลง", type="primary"):
-                    ws = get_sheets().worksheet("Sheet1")
-                    # ใช้ int() ครอบแถวและคอลัมน์เสมอ
-                    ws.update_cell(actual_row_idx, 5, new_note)  # Note
-                    ws.update_cell(actual_row_idx, 6, "วิเคราะห์แล้ว") # Status
-                    ws.update_cell(actual_row_idx, 10, new_gate) # Gate
-                    ws.update_cell(actual_row_idx, 13, new_alley) # Alley
-                    st.success("✅ อัปเดตข้อมูลสำเร็จ!")
-                    st.rerun()
-
-            elif mode == "🗑️ ลบพิกัดที่เลือก":
-                st.warning(f"⚠️ คำเตือน: ระบบจะลบพิกัด '{target_name}' ถาวร")
-                if st.button("🔥 ยืนยันการลบ", type="secondary"):
-                    ws = get_sheets().worksheet("Sheet1")
-                    ws.delete_rows(actual_row_idx) # แก้ TypeError ที่นี่
-                    st.success("🗑️ ลบข้อมูลเรียบร้อยแล้ว")
-                    st.rerun()
-        else: st.info("ยังไม่มีข้อมูลในระบบ")
-
-# --- TAB 3: อาณาเขตพิกัดพร้อม Hover Tooltip ---
+# --- TAB 3: SMART SEARCH & INTERACTIVE MAP ---
 with tab3:
-    st.subheader("🔍 อาณาเขตและพิกัดทั้งหมด")
-    all_df = load_data_all()
+    st.subheader("🔍 ระบบค้นหาอัจฉริยะ")
+    raw_df = load_data()
     
-    if not all_df.empty:
-        # ส่วนแสดงผลแผนที่อาณาเขต
-        st.write("📊 **ภาพรวมอาณาเขต (เอาเมาส์ชี้เพื่อดูรายละเอียดสถานที่)**")
+    if not raw_df.empty:
+        search_query = st.text_input("🔎 พิมพ์อะไรก็ได้ (เช่น 'ประตู 4 ร้านสีแดง ซอย 2'):")
+        results = smart_search(raw_df, search_query)
         
-        # ตั้งค่าแผนที่และ Tooltip
-        view_state = pdk.ViewState(
-            latitude=all_df['lat'].mean(),
-            longitude=all_df['lon'].mean(),
-            zoom=14
-        )
+        # แสดงแผนที่อาณาเขตพร้อม Hover Tooltip
+        st.write("🌍 **อาณาเขตข้อมูล (ชี้ที่จุดเพื่อดูรายละเอียด)**")
+        view_state = pdk.ViewState(latitude=results['lat'].mean(), longitude=results['lon'].mean(), zoom=14)
         
         layer = pdk.Layer(
             "ScatterplotLayer",
-            all_df,
+            results,
             get_position='[lon, lat]',
             get_color='[255, 75, 75, 200]',
             get_radius=40,
-            pickable=True, # สำคัญ: เพื่อให้เมาส์ชี้ได้
+            pickable=True,
         )
         
         st.pydeck_chart(pdk.Deck(
@@ -138,37 +133,29 @@ with tab3:
             layers=[layer],
             tooltip={
                 "html": """
-                <div style='background: white; color: black; padding: 12px; border-radius: 8px; border: 1px solid #ccc; font-family: sans-serif;'>
-                    <b style='font-size: 14px;'>🏠 {place_name}</b><hr style='margin: 5px 0;'>
+                <div style='background: white; color: black; padding: 10px; border-radius: 5px;'>
+                    <b>🏠 สถานที่:</b> {place_name} <br/>
                     <b>🚪 ประตู:</b> {gate} <br/>
-                    <b>🛣️ ซอย:</b> {main_alley} <br/>
-                    <b>🗒️ หมายเหตุ:</b> {note} <br/>
-                    <b>🕒 บันทึกเมื่อ:</b> {timestamp}
+                    <b>🗒️ หมายเหตุ:</b> {note}
                 </div>
-                """,
-                "style": {"zIndex": "10000"}
+                """
             }
         ))
         
         
 
-        # ระบบค้นหาและนำทางรายบุคคล
-        st.divider()
-        search_q = st.text_input("🔍 ค้นหาชื่อสถานที่เพื่อดูภาพจำลอง:")
-        if search_q:
-            res = all_df[all_df.apply(lambda r: search_q.lower() in str(r.values).lower(), axis=1)]
-            for _, row in res.iterrows():
-                with st.expander(f"📍 {row['place_name']}"):
-                    c_a, c_b = st.columns(2)
-                    with c_a:
-                        st.write(f"**ประตู:** {row.get('gate', '-')}")
-                        st.write(f"**หมายเหตุ:** {row['note']}")
-                        st.link_button("🚗 ไป Google Maps", f"https://www.google.com/maps?q={row['lat']},{row['lon']}")
-                    with c_b:
-                        # ภาพจำลองดาวเทียมรายจุด
-                        st.pydeck_chart(pdk.Deck(
-                            map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
-                            initial_view_state=pdk.ViewState(latitude=row['lat'], longitude=row['lon'], zoom=18),
-                            layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame([row]), get_position='[lon, lat]', get_color='[255,0,0]', get_radius=10)]
-                        ))
-    else: st.info("ไม่มีข้อมูลพิกัดในขณะนี้")
+        # แสดงรายการที่ค้นหาพบ
+        st.write(f"พบข้อมูลที่เกี่ยวข้อง {len(results)} รายการ")
+        for _, r in results.iterrows():
+            with st.expander(f"📌 {r['place_name']} (ความเกี่ยวข้อง: {r.get('relevance', 0)})"):
+                c_a, c_b = st.columns(2)
+                with c_a:
+                    st.write(f"**ประตู:** {r['gate']} | **หมายเหตุ:** {r['note']}")
+                    st.link_button("🚗 นำทาง", f"https://www.google.com/maps?q={r['lat']},{r['lon']}")
+                with c_b:
+                    # ภาพจำลองดาวเทียม
+                    st.pydeck_chart(pdk.Deck(
+                        map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+                        initial_view_state=pdk.ViewState(latitude=r['lat'], longitude=r['lon'], zoom=18),
+                        layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame([r]), get_position='[lon, lat]', get_color='[255,0,0]', get_radius=10)]
+                    ))

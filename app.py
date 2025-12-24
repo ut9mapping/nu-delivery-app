@@ -5,14 +5,11 @@ from google.oauth2.service_account import Credentials
 from streamlit_geolocation import streamlit_geolocation
 from datetime import datetime
 import pydeck as pdk
-import difflib  # สำหรับแก้คำพิมพ์ผิด (Fuzzy Matching)
-import re      # สำหรับตรวจจับตัวเลข/เลขที่บ้าน
+import difflib
+import re
 
-# --- 1. การตั้งค่าระบบและการเชื่อมต่อ ---
-st.set_page_config(page_title="NU Delivery: Smart AI Pro", layout="wide")
-
-# พิกัดกลาง (ม.นเรศวร)
-DEFAULT_LAT, DEFAULT_LON = 16.7469, 100.1914
+# --- 1. ตั้งค่าการเชื่อมต่อ Google Sheets ---
+st.set_page_config(page_title="NU Delivery: Smart Subset System", layout="wide")
 
 def get_sheets():
     try:
@@ -20,96 +17,75 @@ def get_sheets():
         creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
         return gspread.authorize(creds).open_by_key(st.secrets["SHEET_ID"])
     except Exception as e:
-        st.error(f"เชื่อมต่อ Google Sheets ไม่ได้: {e}")
+        st.error(f"Error Connecting to Sheets: {e}")
         return None
 
-# โหลดข้อมูลหลัก (Sheet1)
-def load_main_data():
+def load_data(sheet_name="Sheet1"):
     sh = get_sheets()
     if not sh: return pd.DataFrame()
-    ws = sh.worksheet("Sheet1")
+    ws = sh.worksheet(sheet_name)
     df = pd.DataFrame(ws.get_all_records())
-    if not df.empty:
-        df.columns = [c.strip() for c in df.columns]
+    if not df.empty and 'lat' in df.columns:
         df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
         df['lon'] = pd.to_numeric(df['lon'], errors='coerce')
-        return df.dropna(subset=['lat', 'lon'])
+        return df.dropna(subset=['lat', 'lon']) if sheet_name == "Sheet1" else df
     return df
 
-# ✨ ฟังก์ชันดึงตัวเลือกจากชีต Mapping (ดึงจากภาพที่คุณส่งมา)
-def get_mapping_options():
-    try:
-        sh = get_sheets()
-        ws = sh.worksheet("Mapping")
-        df_map = pd.DataFrame(ws.get_all_records())
-        # ทำความสะอาดข้อมูล: กรองค่าว่างและเอาเฉพาะค่าที่ไม่ซ้ำ
-        def clean_opt(col):
-            return sorted([str(x) for x in df_map[col].unique() if x and x != '-'])
-
-        return {
-            "gate": clean_opt("gate"),
-            "road": clean_opt("road"),
-            "road_side": clean_opt("road_side"),
-            "main_alley": clean_opt("main_alley"),
-            "main_side": clean_opt("main_side"),
-            "sub_alley": clean_opt("sub_alley"),
-            "sub_side": clean_opt("sub_side")
-        }
-    except:
-        return {k: ["-"] for k in ["gate", "road", "road_side", "main_alley", "main_side", "sub_alley", "sub_side"]}
-
-# --- 2. 🧠 SUPER AI SEARCH LOGIC (ฉลาด เข้าใจคำถาม และคำผิด) ---
+# --- 2. 🧠 SUPER AI SEARCH LOGIC (Fuzzy + Number Match) ---
 def super_ai_search(df, query):
-    if not query: 
-        return df, "สวัสดีครับ! ผมคือ AI ผู้ช่วยหาพิกัด พิมพ์ถามได้เลย เช่น 'บ้านเลขที่ 55' หรือ 'หอพักแถวประตู 4'"
+    if not query:
+        return df, "สวัสดีครับ! พิมพ์ถามสิ่งที่ต้องการหาได้เลย เช่น 'บ้านเลขที่ 12/3' หรือ 'ซอย NU Plaza'"
     
     q = query.lower().strip()
-    digits = re.findall(r'\d+', q) # สกัดตัวเลขออกมาสำหรับหาเลขที่บ้าน
+    digits = re.findall(r'\d+', q)
     
     def get_score(row):
         score = 0
-        name = str(row.get('place_name','')).lower()
-        note = str(row.get('note','')).lower()
-        full_text = f"{name} {note} {row.get('gate','')} {row.get('main_alley','')} {row.get('sub_alley','')}".lower()
+        name = str(row.get('place_name', '')).lower()
+        note = str(row.get('note', '')).lower()
+        gate = str(row.get('gate', '')).lower()
+        alley = str(row.get('main_alley', '')).lower()
         
-        if q in full_text: score += 10 # ค้นหาแบบตรงตัว
-        for num in digits:
-            if num in full_text: score += 15 # ค้นหาเลขที่บ้าน
+        full_text = f"{name} {note} {gate} {alley}".lower()
+        
+        if q in full_text: score += 10 # ค้นตรงตัว
+        for n in digits:
+            if n in full_text: score += 15 # ค้นเลขที่บ้าน/ตึก
             
-        # Fuzzy Match (พิมพ์ผิด)
+        # ค้นหาคำใกล้เคียง (พิมพ์ผิดนิดหน่อยก็เจอ)
         similarity = difflib.SequenceMatcher(None, q, name).ratio()
-        if similarity > 0.5: score += (similarity * 10)
+        if similarity > 0.6: score += (similarity * 10)
         
         return score
 
-    df_res = df.copy()
-    df_res['ai_score'] = df_res.apply(get_score, axis=1)
-    results = df_res[df_res['ai_score'] > 2].sort_values(by='ai_score', ascending=False)
+    temp_df = df.copy()
+    temp_df['ai_score'] = temp_df.apply(get_score, axis=1)
+    results = temp_df[temp_df['ai_score'] > 2].sort_values(by='ai_score', ascending=False)
     
     if not results.empty:
-        msg = f"🤖 ผมวิเคราะห์แล้วครับ พบสถานที่ที่ใกล้เคียงที่สุดคือ **{results.iloc[0]['place_name']}**"
+        msg = f"🤖 วิเคราะห์แล้วครับ พบสถานที่ใกล้เคียงคือ **{results.iloc[0]['place_name']}**"
     else:
-        msg = "😅 ขออภัยครับ ผมยังไม่เจอข้อมูลที่ตรงตามนั้น ลองระบุชื่อสั้นๆ ดูครับ"
+        msg = "😅 ไม่พบพิกัดที่ระบุ ลองพิมพ์สั้นๆ หรือใช้เลขประตูช่วยครับ"
     return results, msg
 
-# --- 3. หน้าจอหลักและการจัดการข้อมูล ---
-st.title("🛵 NU Delivery Pro (Super AI + Mapping)")
+# --- 3. UI MAIN INTERFACE ---
+st.title("🛵 NU Delivery Pro: Smart Subset & AI")
 
-tab1, tab2, tab3 = st.tabs(["📌 บันทึกหน้างาน (User)", "⚙️ วิเคราะห์ข้อมูล (Admin)", "🔍 ค้นหาและอาณาเขต"])
+tab1, tab2, tab3 = st.tabs(["📌 บันทึกหน้างาน", "⚙️ จัดการข้อมูล (Admin)", "🔍 ค้นหาอัจฉริยะ"])
 
-# --- TAB 1: USER (พิกัด + รูป 3 ช่อง) ---
+# --- TAB 1: USER INPUT ---
 with tab1:
-    st.subheader("📝 ส่งข้อมูลพิกัดใหม่")
-    loc = streamlit_geolocation()
-    lat, lon = loc.get('latitude'), loc.get('longitude')
+    st.subheader("📝 บันทึกพิกัดใหม่")
+    location = streamlit_geolocation()
+    lat, lon = location.get('latitude'), location.get('longitude')
     
-    if lat: st.success(f"📍 GPS Lock: {lat}, {lon}")
-    else: st.warning("📡 กำลังรอพิกัด GPS... (โปรดกดยอมรับสิทธิ์)")
+    if lat: st.success(f"📍 พิกัดพร้อม: {lat}, {lon}")
+    else: st.warning("📡 กรุณาเปิด GPS และกดยอมรับสิทธิ์ที่เบราว์เซอร์")
 
     p_name = st.text_input("🏠 ชื่อสถานที่ / ตึกแถว / บ้านเลขที่")
-    note = st.text_area("🗒️ จุดสังเกตดิบจากหน้างาน (User Note)")
+    user_note = st.text_area("🗒️ จุดสังเกตดิบจากหน้างาน (User Note)")
     
-    st.write("🖼️ อัปโหลดรูปภาพประกอบ (3 รูป)")
+    st.write("🖼️ อัปโหลดรูปภาพประกอบ (3 ช่อง)")
     c1, c2, c3 = st.columns(3)
     img1 = c1.file_uploader("รูป 1", type=['jpg','png'], key="u1")
     img2 = c2.file_uploader("รูป 2", type=['jpg','png'], key="u2")
@@ -118,100 +94,125 @@ with tab1:
     if st.button("🚀 ส่งข้อมูลให้แอดมิน", use_container_width=True, type="primary"):
         if lat and p_name:
             ws = get_sheets().worksheet("Sheet1")
-            has_imgs = ["Yes" if i else "No" for i in [img1, img2, img3]]
-            # บันทึกข้อมูลเบื้องต้น
-            new_row = [datetime.now().strftime("%Y-%m-%d %H:%M"), lat, lon, p_name, note, "รอวิเคราะห์"] + has_imgs + [""]*7
+            imgs = ["Yes" if i else "No" for i in [img1, img2, img3]]
+            # บันทึกข้อมูลเบื้องต้นลงคอลัมน์ A-I (รอแอดมินมาเติม J-P)
+            new_row = [datetime.now().strftime("%Y-%m-%d %H:%M"), lat, lon, p_name, user_note, "รอวิเคราะห์"] + imgs + [""]*7
             ws.insert_row(new_row, index=2)
             st.balloons()
-            st.success("✅ บันทึกแล้ว! รอแอดมินประมวลผลแยกหมวดหมู่")
-        else: st.error("⚠️ ข้อมูลไม่ครบ")
+            st.success("✅ ข้อมูลส่งถึงแอดมินแล้ว!")
+        else: st.error("⚠️ กรุณาระบุชื่อสถานที่และเปิด GPS")
 
-# --- TAB 2: ADMIN (ดึงตัวเลือกจากชีต Mapping) ---
+# --- TAB 2: ADMIN SUBSET SYSTEM (หัวใจสำคัญ) ---
 with tab2:
     pwd = st.text_input("รหัสผ่านแอดมิน", type="password")
     if pwd == "9999":
-        st.subheader("⚙️ โต๊ะทำงานแอดมิน: ประมวลผลจากชีต Mapping")
+        st.subheader("⚙️ โต๊ะทำงานแอดมิน: จัดกลุ่มซับเซต")
         
-        # ดึงตัวเลือกจากชีต Mapping มาแสดงผล
-        opts = get_mapping_options()
-        df_admin = load_main_data()
+        df_mapping = load_data("Mapping")
+        df_main = load_data("Sheet1")
         
-        if not df_admin.empty:
-            for idx, row in df_admin.iterrows():
-                actual_idx = int(idx) + 2
-                status_color = "🔵" if row['status'] == "รอวิเคราะห์" else "🟢"
-                
-                with st.expander(f"{status_color} {row['place_name']} | {row['timestamp']}"):
-                    st.info(f"💬 โน้ตจากยูสเซอร์: {row['note']}")
+        if not df_main.empty and not df_mapping.empty:
+            # กรองเฉพาะงานที่ยังไม่ตรวจ
+            pending_tasks = df_main[df_main['status'] == "รอวิเคราะห์"]
+            
+            if pending_tasks.empty:
+                st.info("ไม่มีงานค้างในขณะนี้")
+            
+            for idx, row in pending_tasks.iterrows():
+                actual_row_num = int(idx) + 2
+                with st.expander(f"🆕 ตรวจสอบ: {row['place_name']} ({row['timestamp']})"):
+                    st.warning(f"💬 Note: {row['note']}")
                     
-                    # ส่วนการเลือกข้อมูลที่อ้างอิงจากชีต Mapping
-                    st.write("**🧠 เลือกข้อมูลตามโครงสร้างพื้นที่ (Mapping):**")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        v_gate = st.selectbox("1. ประตู:", opts['gate'], key=f"g_{idx}")
-                        v_road = st.selectbox("2. ถนน:", opts['road'], key=f"r_{idx}")
-                    with col2:
-                        v_road_side = st.selectbox("3. ฝั่งถนน:", opts['road_side'], key=f"rs_{idx}")
-                        v_main_alley = st.selectbox("4. ซอยหลัก:", opts['main_alley'], key=f"ma_{idx}")
-                    with col3:
-                        v_main_side = st.selectbox("5. ฝั่งซอย:", opts['main_side'], key=f"ms_{idx}")
-                        v_sub_alley = st.selectbox("6. ซอยย่อย:", opts['sub_alley'], key=f"sa_{idx}")
+                    # --- START CASCADING LOGIC (SUBSET) ---
+                    m_df = df_mapping.copy()
                     
-                    v_note = st.text_area("🗒️ สรุปจุดสังเกตใหม่ (ฉบับแอดมิน):", value=row['note'], key=f"fn_{idx}")
+                    col_a, col_b, col_c = st.columns(3)
                     
-                    btn_sv, btn_dl = st.columns(2)
-                    if btn_sv.button("💾 บันทึกการวิเคราะห์", key=f"save_{idx}", use_container_width=True):
+                    with col_a:
+                        # 1. เลือกประตู
+                        gate_list = sorted(m_df['gate'].unique())
+                        sel_gate = st.selectbox("เลือกประตู:", gate_list, key=f"g_{idx}")
+                        m_df = m_df[m_df['gate'] == sel_gate]
+                        
+                        # 2. เลือกถนน (กรองตามประตู)
+                        road_list = sorted(m_df['road'].unique())
+                        sel_road = st.selectbox("เลือกถนน:", road_list, key=f"r_{idx}")
+                        m_df = m_df[m_df['road'] == sel_road]
+                        
+                    with col_b:
+                        # 3. ฝั่งถนน
+                        rs_list = sorted(m_df['road_side'].unique())
+                        sel_rs = st.selectbox("ฝั่งถนน:", rs_list, key=f"rs_{idx}")
+                        m_df = m_df[m_df['road_side'] == sel_rs]
+                        
+                        # 4. ซอยหลัก
+                        ma_list = sorted(m_df['main_alley'].unique())
+                        sel_ma = st.selectbox("ซอยหลัก:", ma_list, key=f"ma_{idx}")
+                        m_df = m_df[m_df['main_alley'] == sel_ma]
+                        
+                    with col_c:
+                        # 5. ฝั่งซอยหลัก
+                        ms_list = sorted(m_df['main_side'].unique())
+                        sel_ms = st.selectbox("ฝั่งซอยหลัก:", ms_list, key=f"ms_{idx}")
+                        m_df = m_df[m_df['main_side'] == sel_ms]
+                        
+                        # 6. ซอยย่อย
+                        sa_list = sorted(m_df['sub_alley'].unique())
+                        sel_sa = st.selectbox("ซอยย่อย:", sa_list, key=f"sa_{idx}")
+                        m_df = m_df[m_df['sub_alley'] == sel_sa]
+                    
+                    # 7. ฝั่งซอยย่อย
+                    ss_list = sorted(m_df[m_df['sub_alley'] == sel_sa]['sub_side'].unique())
+                    sel_ss = st.selectbox("ฝั่งซอยย่อย:", ss_list, key=f"ss_{idx}")
+                    
+                    final_admin_note = st.text_area("สรุปจุดสังเกตใหม่ (ฉบับแอดมิน):", value=row['note'], key=f"an_{idx}")
+                    
+                    if st.button("💾 บันทึกซับเซตลงฐานข้อมูล", key=f"save_{idx}", use_container_width=True):
                         ws = get_sheets().worksheet("Sheet1")
-                        # อัปเดตข้อมูลลง Sheet1 ตามลำดับคอลัมน์ของคุณ
-                        updates = [
-                            {'range': f'E{actual_idx}', 'values': [[v_note]]},
-                            {'range': f'F{actual_idx}', 'values': [["วิเคราะห์แล้ว"]]},
-                            {'range': f'J{actual_idx}', 'values': [[v_gate]]},
-                            {'range': f'K{actual_idx}', 'values': [[v_road]]},
-                            {'range': f'L{actual_idx}', 'values': [[v_road_side]]},
-                            {'range': f'M{actual_idx}', 'values': [[v_main_alley]]},
-                            {'range': f'N{actual_idx}', 'values': [[v_main_side]]},
-                            {'range': f'O{actual_idx}', 'values': [[v_sub_alley]]},
-                        ]
-                        for up in updates: ws.update(up['range'], up['values'])
-                        st.success("✅ วิเคราะห์ข้อมูลสำเร็จ!")
+                        # อัปเดตข้อมูลทั้ง 7 ระดับลงคอลัมน์ J-P
+                        ws.update_cell(actual_row_num, 5, final_admin_note) # Note (E)
+                        ws.update_cell(actual_row_num, 6, "วิเคราะห์แล้ว") # Status (F)
+                        ws.update_cell(actual_row_num, 10, sel_gate) # J
+                        ws.update_cell(actual_row_num, 11, sel_road) # K
+                        ws.update_cell(actual_row_num, 12, sel_rs)   # L
+                        ws.update_cell(actual_row_num, 13, sel_ma)   # M
+                        ws.update_cell(actual_row_num, 14, sel_ms)   # N
+                        ws.update_cell(actual_row_num, 15, sel_sa)   # O
+                        ws.update_cell(actual_row_num, 16, sel_ss)   # P
+                        st.success("✅ จัดหมวดหมู่สำเร็จ!")
                         st.rerun()
 
-                    if btn_dl.button("🗑️ ลบทิ้ง", key=f"del_{idx}", use_container_width=True):
-                        get_sheets().worksheet("Sheet1").delete_rows(actual_idx)
-                        st.warning("ลบข้อมูลแล้ว")
-                        st.rerun()
-
-# --- TAB 3: SEARCH & MAP (Super AI) ---
+# --- TAB 3: AI SEARCH & MAP ---
 with tab3:
-    st.subheader("🔍 ผู้ช่วย AI ค้นหาและดูอาณาเขต")
-    q = st.text_input("💬 ถาม AI:", placeholder="เช่น 'หอพักที่อยู่ประตู 4 ซอยโซนเซเว่น'")
+    st.subheader("🔍 ค้นหาพิกัดและอาณาเขตข้อมูล")
+    user_q = st.text_input("💬 พิมพ์คุยกับ AI:", placeholder="เช่น 'หอพักใกล้ประตู 4 ซอยโซนเซเว่น'")
     
-    raw_df = load_main_data()
-    if not raw_df.empty:
-        results, ai_msg = super_ai_search(raw_df, q)
+    full_data = load_data("Sheet1")
+    if not full_data.empty:
+        search_res, ai_msg = super_ai_search(full_data, user_q)
         
         st.chat_message("assistant").write(ai_msg)
         
-        # แผนที่อาณาเขต
-        st.pydeck_chart(pdk.Deck(
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-            initial_view_state=pdk.ViewState(latitude=results['lat'].mean() if not results.empty else DEFAULT_LAT, 
-                                           longitude=results['lon'].mean() if not results.empty else DEFAULT_LON, zoom=15),
-            layers=[pdk.Layer("ScatterplotLayer", results, get_position='[lon, lat]', get_color='[255, 75, 75, 180]', get_radius=40, pickable=True)],
-            tooltip={"html": "<b>{place_name}</b><br/>ประตู: {gate}<br/>ซอย: {main_alley}<br/>หมายเหตุ: {note}"}
-        ))
-        
-        for _, r in results.iterrows():
-            with st.expander(f"📌 {r['place_name']} - {r['gate']}"):
-                ca, cb = st.columns(2)
-                with ca:
-                    st.write(f"🏠 **ซอย:** {r.get('main_alley','-')} | **ซอยย่อย:** {r.get('sub_alley','-')}")
-                    st.write(f"📝 **แอดมินสรุป:** {r['note']}")
-                    st.link_button("🚗 นำทาง", f"https://www.google.com/maps?q={r['lat']},{r['lon']}")
-                with cb:
-                    st.pydeck_chart(pdk.Deck(
-                        map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
-                        initial_view_state=pdk.ViewState(latitude=r['lat'], longitude=r['lon'], zoom=18),
-                        layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame([r]), get_position='[lon, lat]', get_color='[255,0,0]', get_radius=10)]
-                    ))
+        if not search_res.empty:
+            # แผนที่ภาพรวม (Hover ได้)
+            st.pydeck_chart(pdk.Deck(
+                map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+                initial_view_state=pdk.ViewState(latitude=search_res['lat'].mean(), longitude=search_res['lon'].mean(), zoom=15),
+                layers=[pdk.Layer("ScatterplotLayer", search_res, get_position='[lon, lat]', get_color='[255, 75, 75, 200]', get_radius=40, pickable=True)],
+                tooltip={"html": "<b>{place_name}</b><br/>ประตู: {gate}<br/>ซอย: {main_alley}<br/>โน้ต: {note}"}
+            ))
+            
+            # รายละเอียดรายบุคคล
+            for _, r in search_res.iterrows():
+                with st.expander(f"📍 {r['place_name']} (วิเคราะห์แล้วโดย AI)"):
+                    ca, cb = st.columns(2)
+                    with ca:
+                        st.write(f"🏠 **ซอย:** {r['main_alley']} | **ซอยย่อย:** {r['sub_alley']}")
+                        st.write(f"📝 **รายละเอียด:** {r['note']}")
+                        st.link_button("🚗 นำทางด้วย Google Maps", f"https://www.google.com/maps?q={r['lat']},{r['lon']}")
+                    with cb:
+                        st.pydeck_chart(pdk.Deck(
+                            map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+                            initial_view_state=pdk.ViewState(latitude=r['lat'], longitude=r['lon'], zoom=18),
+                            layers=[pdk.Layer("ScatterplotLayer", pd.DataFrame([r]), get_position='[lon, lat]', get_color='[255,0,0]', get_radius=10)]
+                        ))
